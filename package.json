@@ -34,7 +34,7 @@
     "@actions/tool-cache": "^2.0.2",
     "azure-pipelines-task-lib": "^5.2.1",
     "azure-pipelines-tool-lib": "^2.0.10",
-    "fs-extra": "^11.3.1",
+    "fs-extra": "^11.3.2",
     "q": "^1.5.1"
   },
   "devDependencies": {
