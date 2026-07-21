@@ -47,6 +47,12 @@ extends:
           os: linux
         steps:
         - checkout: self
+        - script: cp $(Build.SourcesDirectory)/.pipelines/release.npmrc $(Build.SourcesDirectory)/.npmrc
+          displayName: Copy .npmrc
+        - task: npmAuthenticate@0
+          displayName: Authenticate npm to feed
+          inputs:
+            workingFile: '$(Build.SourcesDirectory)/.npmrc'
         - script: npm install -g tfx-cli
           displayName: Install TFX
         - script: npm install
@@ -128,6 +134,7 @@ extends:
             image: ubuntu-latest
             os: linux
           steps:
+            - checkout: self
             - download: current
               displayName: Download Signed Artifact
               artifact: vsix
@@ -135,8 +142,16 @@ extends:
               displayName: 'Install Node.js 24.x'
               inputs:
                 versionSpec: '24.x'
+            - script: cp $(Build.SourcesDirectory)/.pipelines/release.npmrc $(Build.SourcesDirectory)/.npmrc
+              displayName: Copy .npmrc
+            - task: npmAuthenticate@0
+              displayName: Authenticate npm to feed
+              inputs:
+                workingFile: '$(Build.SourcesDirectory)/.npmrc'
             - task: TfxInstaller@5
               displayName: 'Install TFX CLI'
+              env:
+                NPM_CONFIG_GLOBALCONFIG: $(Build.SourcesDirectory)/.npmrc
               inputs:
                 version: '0.*'
                 checkLatest: true
