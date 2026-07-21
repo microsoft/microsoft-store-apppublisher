@@ -53,7 +53,7 @@ extends:
           displayName: Authenticate npm to feed
           inputs:
             workingFile: '$(Build.SourcesDirectory)/.npmrc'
-        - script: npm install -g tfx-cli
+        - script: npm install -g tfx-cli --globalconfig $(Build.SourcesDirectory)/.npmrc
           displayName: Install TFX
         - script: npm install
           displayName: Install Dependencies
