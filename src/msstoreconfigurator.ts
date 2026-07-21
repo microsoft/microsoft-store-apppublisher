@@ -56,13 +56,11 @@ export class MSStoreCLIConfigurator {
     const downloadURL = `https://github.com/microsoft/msstore-cli/releases/${versionString}/MSStoreCLI-${platform}-${process.arch}${extension}`
 
     pipeline.debug(`Downloading tool from ${downloadURL}`)
-    let downloadPath: string | null = null
-    let archivePath: string | null = null
     const randomDir: string = crypto.randomUUID()
     const tempDir = path.join(os.tmpdir(), 'tmp', 'runner', randomDir)
     pipeline.debug(`Creating tempdir ${tempDir}`)
     await pipeline.mkdirP(tempDir)
-    downloadPath = await pipeline.downloadTool(downloadURL)
+    const downloadPath: string = await pipeline.downloadTool(downloadURL)
 
     let name: string
     if (process.platform === 'win32') {
@@ -71,11 +69,10 @@ export class MSStoreCLIConfigurator {
       name = 'msstore'
     }
 
-    if (extension === '.tar.gz') {
-      archivePath = await pipeline.extractTar(downloadPath, tempDir)
-    } else {
-      archivePath = await pipeline.extractZip(downloadPath, tempDir)
-    }
+    const archivePath: string =
+      extension === '.tar.gz'
+        ? await pipeline.extractTar(downloadPath, tempDir)
+        : await pipeline.extractZip(downloadPath, tempDir)
 
     await this.moveToPath(archivePath, name, pipeline)
 

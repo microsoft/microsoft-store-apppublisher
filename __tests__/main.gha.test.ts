@@ -3,6 +3,15 @@ import * as main from '../src/main'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
+import {
+  jest,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  beforeAll,
+  afterAll
+} from '@jest/globals'
 
 // Mock the GitHub Actions core library
 const warningMock = jest.spyOn(core, 'warning')

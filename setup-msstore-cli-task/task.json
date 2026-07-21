@@ -9,11 +9,11 @@
     "author": "Microsoft",
     "version": {
         "Major": 0,
-        "Minor": 3,
-        "Patch": 2
+        "Minor": 4,
+        "Patch": 0
     },
     "instanceNameFormat": "Use Microsoft Store Developer CLI $(version)",
-    "minimumAgentVersion": "2.200.0",
+    "minimumAgentVersion": "4.248.0",
     "inputs": [
         {
             "name": "version",
@@ -25,10 +25,10 @@
         }
     ],
     "execution": {
-        "Node16": {
+        "Node20_1": {
             "target": "index.js"
         },
-        "Node20_1": {
+        "Node24": {
             "target": "index.js"
         }
     }

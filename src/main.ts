@@ -46,8 +46,3 @@ export async function run(): Promise<void> {
     if (error instanceof Error) core.setFailed(error.message)
   }
 }
-
-// Only run when this file is executed directly, not when imported
-if (require.main === module) {
-  run()
-}
