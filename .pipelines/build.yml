@@ -134,6 +134,7 @@ extends:
             image: ubuntu-latest
             os: linux
           steps:
+            - checkout: self
             - download: current
               displayName: Download Signed Artifact
               artifact: vsix
