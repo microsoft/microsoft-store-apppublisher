@@ -129,6 +129,8 @@ extends:
         jobs:
         - job: PublishToMarketplaceJob
           displayName: Publish to Marketplace
+          variables:
+            NPM_CONFIG_GLOBALCONFIG: $(Build.SourcesDirectory)/.npmrc
           pool:
             name: Azure-Pipelines-1ESPT-ExDShared
             image: ubuntu-latest
@@ -148,8 +150,11 @@ extends:
               displayName: Authenticate npm to feed
               inputs:
                 workingFile: '$(Build.SourcesDirectory)/.npmrc'
-            - script: npm install -g tfx-cli --globalconfig $(Build.SourcesDirectory)/.npmrc
-              displayName: Install TFX
+            - task: TfxInstaller@5
+              displayName: 'Install TFX CLI'
+              inputs:
+                version: '0.*'
+                checkLatest: true
             - task: 1ES.PublishAzureDevOpsExtension@1
               displayName: 'Publish the production extension to the Marketplace'
               inputs:
