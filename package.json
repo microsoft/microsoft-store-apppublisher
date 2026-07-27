@@ -48,8 +48,8 @@
     "@types/fs-extra": "^11.0.4",
     "@types/jest": "^30.0.0",
     "@types/node": "^26.1.1",
-    "@typescript-eslint/eslint-plugin": "^8.56.1",
-    "@typescript-eslint/parser": "^8.56.1",
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
     "babel-jest": "^30.4.1",
     "esbuild": "^0.28.1",
     "eslint": "^10.7.0",
@@ -58,7 +58,7 @@
     "eslint-plugin-prettier": "^5.5.5",
     "globals": "^17.4.0",
     "jest": "^30.2.0",
-    "prettier": "3.9.5",
+    "prettier": "3.9.6",
     "ts-jest": "^29.4.6",
     "typescript": "^6.0.3"
   }
