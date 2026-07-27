@@ -129,6 +129,8 @@ extends:
         jobs:
         - job: PublishToMarketplaceJob
           displayName: Publish to Marketplace
+          variables:
+            NPM_CONFIG_GLOBALCONFIG: $(Build.SourcesDirectory)/.npmrc
           pool:
             name: Azure-Pipelines-1ESPT-ExDShared
             image: ubuntu-latest
@@ -150,8 +152,6 @@ extends:
                 workingFile: '$(Build.SourcesDirectory)/.npmrc'
             - task: TfxInstaller@5
               displayName: 'Install TFX CLI'
-              env:
-                NPM_CONFIG_GLOBALCONFIG: $(Build.SourcesDirectory)/.npmrc
               inputs:
                 version: '0.*'
                 checkLatest: true
