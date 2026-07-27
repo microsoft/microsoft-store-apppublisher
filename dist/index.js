@@ -22537,8 +22537,13 @@ var require_symlink = __commonJS({
             srcStat = await fs6.stat(srcpath, { bigint: true });
           }
         }
-        const dstStat = await fs6.stat(dstpath, { bigint: true });
-        if (areIdentical(srcStat, dstStat)) return;
+        let dstStat;
+        try {
+          dstStat = await fs6.stat(dstpath, { bigint: true });
+        } catch (err) {
+          if (err.code !== "ENOENT") throw err;
+        }
+        if (dstStat && areIdentical(srcStat, dstStat)) return;
       }
       const relative2 = await symlinkPaths(srcpath, dstpath);
       srcpath = relative2.toDst;
@@ -22568,8 +22573,13 @@ var require_symlink = __commonJS({
             srcStat = fs6.statSync(srcpath, { bigint: true });
           }
         }
-        const dstStat = fs6.statSync(dstpath, { bigint: true });
-        if (areIdentical(srcStat, dstStat)) return;
+        let dstStat;
+        try {
+          dstStat = fs6.statSync(dstpath, { bigint: true });
+        } catch (err) {
+          if (err.code !== "ENOENT") throw err;
+        }
+        if (dstStat && areIdentical(srcStat, dstStat)) return;
       }
       const relative2 = symlinkPathsSync(srcpath, dstpath);
       srcpath = relative2.toDst;
