@@ -33,7 +33,7 @@
     "@actions/io": "^3.0.2",
     "@actions/tool-cache": "^4.0.0",
     "azure-pipelines-task-lib": "^5.277.0",
-    "azure-pipelines-tool-lib": "^2.0.12",
+    "azure-pipelines-tool-lib": "^2.280.1",
     "fs-extra": "^11.4.0"
   },
   "overrides": {
