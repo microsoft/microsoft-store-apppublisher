@@ -6,8 +6,30 @@ updates:
       interval: daily
     cooldown:
       default-days: 7
+    groups:
+      # init/autobuild/analyze must always be on the same version, otherwise
+      # autobuild fails with "Loaded a configuration file for version X, but
+      # running version Y". Keep them in a single PR.
+      codeql-action:
+        patterns:
+          - 'github/codeql-action*'
 
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # @babel/core and @babel/preset-env are peer-linked; bumping either one
+      # on its own produces an npm ERESOLVE conflict.
+      babel:
+        patterns:
+          - '@babel/*'
+          - 'babel-*'
+    ignore:
+      # ts-jest (29.4.12, latest) declares
+      # peerOptional @babel/core ">=7.0.0-beta.0 <8", so Babel 8 cannot be
+      # installed here yet. Remove these once ts-jest supports Babel 8.
+      - dependency-name: '@babel/core'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@babel/preset-env'
+        update-types: ['version-update:semver-major']
