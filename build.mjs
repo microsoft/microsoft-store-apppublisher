@@ -35,6 +35,9 @@ const adoResult = await esbuild.build({
   metafile: true
 })
 
+patchIpv6ProxyHostname('dist/index.js', 'proxyUrl')
+patchIpv6ProxyHostname('setup-msstore-cli-task/index.js', 'proxy.proxyUrl')
+
 // azure-pipelines-task-lib / azure-pipelines-tool-lib read their localized string
 // resources (lib.json) from disk at runtime relative to the bundle, so place them
 // next to the generated index.js.
@@ -50,6 +53,16 @@ copyFileSync(
 // Third-party license notice for the published Marketplace extension
 // (vss-extension.json references licenses.txt as its thirdpartynotice).
 writeThirdPartyNotices(adoResult.metafile, 'setup-msstore-cli-task/licenses.txt')
+
+function patchIpv6ProxyHostname(file, proxyUrl) {
+  const bundle = readFileSync(file, 'utf8')
+  const original = `host: ${proxyUrl}.hostname,`
+  const normalized = `host: ${proxyUrl}.hostname.replace(/^\\[(.*)\\]$/, '$1'),`
+  if (bundle.split(original).length !== 2) {
+    throw new Error(`Expected one proxy hostname in ${file}`)
+  }
+  writeFileSync(file, bundle.replace(original, normalized))
+}
 
 function writeThirdPartyNotices(metafile, outFile) {
   const packages = new Set()
