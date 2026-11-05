@@ -27,12 +27,42 @@ await esbuild.build({
   outfile: 'dist/index.js'
 })
 
+// typed-rest-client parses the proxy with `new URL()`, whose `.hostname` keeps the
+// brackets of IPv6 literals (e.g. `[::1]`). Passing that to `tunnel` as `host`
+// makes Node try a DNS lookup of `[::1]`, so strip the brackets at bundle time.
+const typedRestClientIpv6ProxyFix = {
+  name: 'typed-rest-client-ipv6-proxy-fix',
+  setup(build) {
+    build.onLoad(
+      {filter: /[\\/]typed-rest-client[\\/]HttpClient\.js$/},
+      async args => {
+        const search = 'host: proxy.proxyUrl.hostname,'
+        const source = readFileSync(args.path, 'utf8')
+        if (!source.includes(search)) {
+          throw new Error(
+            `typed-rest-client IPv6 proxy fix no longer applies to ${args.path}`
+          )
+        }
+        return {
+          contents: source.replace(
+            search,
+            () =>
+              "host: proxy.proxyUrl.hostname.replace(/^\\[(.*)\\]$/, '$1'),"
+          ),
+          loader: 'js'
+        }
+      }
+    )
+  }
+}
+
 // Azure DevOps task bundle -> setup-msstore-cli-task/index.js (referenced by task.json).
 const adoResult = await esbuild.build({
   ...common,
   entryPoints: ['src/azure-devops-task.ts'],
   outfile: 'setup-msstore-cli-task/index.js',
-  metafile: true
+  metafile: true,
+  plugins: [typedRestClientIpv6ProxyFix]
 })
 
 // azure-pipelines-task-lib / azure-pipelines-tool-lib read their localized string
