@@ -24024,7 +24024,7 @@ var HttpClient = class {
         keepAlive: this._keepAlive,
         proxy: Object.assign(Object.assign({}, (proxyUrl.username || proxyUrl.password) && {
           proxyAuth: `${proxyUrl.username}:${proxyUrl.password}`
-        }), { host: proxyUrl.hostname, port: proxyUrl.port })
+        }), { host: proxyUrl.hostname.replace(/^\[(.*)\]$/, '$1'), port: proxyUrl.port })
       };
       let tunnelAgent;
       const overHttps = proxyUrl.protocol === "https:";
