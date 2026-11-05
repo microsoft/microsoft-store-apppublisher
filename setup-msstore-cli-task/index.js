@@ -116,6 +116,8 @@ var require_brace_expansion = __commonJS({
     var escClose = "\0CLOSE" + Math.random() + "\0";
     var escComma = "\0COMMA" + Math.random() + "\0";
     var escPeriod = "\0PERIOD" + Math.random() + "\0";
+    var EXPANSION_MAX = 1e5;
+    var EXPANSION_MAX_LENGTH = 4e6;
     function numeric(str) {
       return parseInt(str, 10) == str ? parseInt(str, 10) : str.charCodeAt(0);
     }
@@ -149,11 +151,12 @@ var require_brace_expansion = __commonJS({
       if (!str)
         return [];
       options = options || {};
-      var max = options.max == null ? Infinity : options.max;
+      var max = options.max == null ? EXPANSION_MAX : options.max;
+      var maxLength = options.maxLength == null ? EXPANSION_MAX_LENGTH : options.maxLength;
       if (str.substr(0, 2) === "{}") {
         str = "\\{\\}" + str.substr(2);
       }
-      return expand(escapeBraces(str), max, true).map(unescapeBraces);
+      return expand(escapeBraces(str), max, maxLength, true).map(unescapeBraces);
     }
     function embrace(str) {
       return "{" + str + "}";
@@ -167,11 +170,82 @@ var require_brace_expansion = __commonJS({
     function gte(i, y) {
       return i >= y;
     }
-    function expand(str, max, isTop) {
-      var expansions = [];
+    function combine(acc, base, pre, values, max, maxLength, dropEmpties, outBase) {
+      var out = [];
+      var length = 0;
+      for (var a = 0; a < acc.length; a++) {
+        for (var v = 0; v < values.length; v++) {
+          if (out.length >= max) return out;
+          var expansion = acc[a] + pre + values[v];
+          if (dropEmpties && expansion.length === base[a]) continue;
+          if (length + expansion.length > maxLength) return out;
+          out.push(expansion);
+          outBase.push(base[a]);
+          length += expansion.length;
+        }
+      }
+      return out;
+    }
+    function expandSequence(body, isAlphaSequence, max, maxLength) {
+      var n = body.split(/\.\./);
+      var N = [];
+      if (n[0] === void 0 || n[1] === void 0) {
+        return N;
+      }
+      var x = numeric(n[0]);
+      var y = numeric(n[1]);
+      var width = Math.max(n[0].length, n[1].length);
+      var incr = n.length === 3 && n[2] !== void 0 ? Math.max(Math.abs(numeric(n[2])), 1) : 1;
+      var test = lte;
+      var reverse = y < x;
+      if (reverse) {
+        incr *= -1;
+        test = gte;
+      }
+      var pad = n.some(isPadded);
+      var length = 0;
+      for (var i = x; test(i, y) && N.length < max; i += incr) {
+        var c;
+        if (isAlphaSequence) {
+          c = String.fromCharCode(i);
+          if (c === "\\") {
+            c = "";
+          }
+        } else {
+          c = String(i);
+          if (pad) {
+            var need = width - c.length;
+            if (need > 0) {
+              var z = new Array(need + 1).join("0");
+              if (i < 0) {
+                c = "-" + z + c.slice(1);
+              } else {
+                c = z + c;
+              }
+            }
+          }
+        }
+        if (length + c.length > maxLength) break;
+        N.push(c);
+        length += c.length;
+      }
+      return N;
+    }
+    function expand(str, max, maxLength, isTop) {
+      var acc = [""];
+      var accBase = [0];
+      var dropEmpties = false;
+      var firstGroup = true;
+      var nextBase;
       for (; ; ) {
         var m = balanced("{", "}", str);
-        if (!m || /\$$/.test(m.pre)) return [str];
+        if (!m) {
+          return combine(acc, accBase, str, [""], max, maxLength, dropEmpties, []);
+        }
+        var pre = m.pre;
+        if (/\$$/.test(pre)) {
+          return combine(acc, accBase, str, [""], max, maxLength, dropEmpties, []);
+        }
         var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
         var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
         var isSequence = isNumericSequence || isAlphaSequence;
@@ -180,76 +254,91 @@ var require_brace_expansion = __commonJS({
           if (m.post.match(/,(?!,).*\}/)) {
             str = m.pre + "{" + m.body + escClose + m.post;
             isTop = true;
+            firstGroup = true;
+            dropEmpties = false;
+            accBase = [];
+            for (var b = 0; b < acc.length; b++) {
+              accBase.push(acc[b].length);
+            }
             continue;
           }
-          return [str];
+          return combine(
+            acc,
+            accBase,
+            pre + "{" + m.body + "}" + m.post,
+            [""],
+            max,
+            maxLength,
+            dropEmpties,
+            []
+          );
         }
-        var n;
+        if (firstGroup) {
+          dropEmpties = isTop && !isSequence;
+          firstGroup = false;
+        }
+        var values;
         if (isSequence) {
-          n = m.body.split(/\.\./);
+          values = expandSequence(m.body, isAlphaSequence, max, maxLength);
         } else {
-          n = parseCommaParts(m.body);
-          if (n.length === 1) {
-            n = expand(n[0], max, false).map(embrace);
+          var n = parseCommaParts(m.body);
+          if (n.length === 1 && n[0] !== void 0) {
+            n = expand(n[0], max, maxLength, false).map(embrace);
             if (n.length === 1) {
-              var post = m.post.length ? expand(m.post, max, false) : [""];
-              return post.map(function(p) {
-                return m.pre + n[0] + p;
-              });
+              nextBase = [];
+              acc = combine(
+                acc,
+                accBase,
+                pre + n[0],
+                [""],
+                max,
+                maxLength,
+                dropEmpties && !m.post.length,
+                nextBase
+              );
+              accBase = nextBase;
+              if (!m.post.length) break;
+              str = m.post;
+              continue;
             }
           }
-        }
-        var pre = m.pre;
-        var post = m.post.length ? expand(m.post, max, false) : [""];
-        var N;
-        if (isSequence) {
-          var x = numeric(n[0]);
-          var y = numeric(n[1]);
-          var width = Math.max(n[0].length, n[1].length);
-          var incr = n.length == 3 ? Math.max(Math.abs(numeric(n[2])), 1) : 1;
-          var test = lte;
-          var reverse = y < x;
-          if (reverse) {
-            incr *= -1;
-            test = gte;
+          var dropsEmpties = dropEmpties && !m.post.length && !pre;
+          for (var d = 0; dropsEmpties && d < acc.length; d++) {
+            if (acc[d].length !== accBase[d]) {
+              dropsEmpties = false;
+            }
           }
-          var pad = n.some(isPadded);
-          N = [];
-          for (var i = x; test(i, y) && N.length < max; i += incr) {
-            var c;
-            if (isAlphaSequence) {
-              c = String.fromCharCode(i);
-              if (c === "\\")
-                c = "";
-            } else {
-              c = String(i);
-              if (pad) {
-                var need = width - c.length;
-                if (need > 0) {
-                  var z = new Array(need + 1).join("0");
-                  if (i < 0)
-                    c = "-" + z + c.slice(1);
-                  else
-                    c = z + c;
-                }
+          values = [];
+          var valuesLength = 0;
+          outer: for (var j = 0; j < n.length; j++) {
+            var expanded = expand(n[j], max, maxLength, false);
+            for (var k = 0; k < expanded.length; k++) {
+              var v = expanded[k];
+              if (dropsEmpties && !v) continue;
+              if (values.length >= max || valuesLength + v.length > maxLength) {
+                break outer;
               }
+              values.push(v);
+              valuesLength += v.length;
             }
-            N.push(c);
-          }
-        } else {
-          N = concatMap(n, function(el) {
-            return expand(el, max, false);
-          });
-        }
-        for (var j = 0; j < N.length; j++) {
-          for (var k = 0; k < post.length && expansions.length < max; k++) {
-            var expansion = pre + N[j] + post[k];
-            if (!isTop || isSequence || expansion)
-              expansions.push(expansion);
           }
         }
-        return expansions;
+        nextBase = [];
+        acc = combine(
+          acc,
+          accBase,
+          pre,
+          values,
+          max,
+          maxLength,
+          dropEmpties && !m.post.length,
+          nextBase
+        );
+        accBase = nextBase;
+        if (!m.post.length) break;
+        str = m.post;
       }
+      return acc;
     }
   }
 });
@@ -8663,15 +8752,19 @@ var require_utils = __commonJS({
       if (!obj || typeof obj !== "object") {
         return false;
       }
-      return !!(obj.constructor && obj.constructor.isBuffer && obj.constructor.isBuffer(obj));
+      return !!(obj.constructor && typeof obj.constructor.isBuffer === "function" && obj.constructor.isBuffer(obj));
     };
     var combine = function combine2(a, b, arrayLimit, plainObjects, throwOnLimitExceeded) {
       if (isOverflow(a)) {
         if (throwOnLimitExceeded) {
           throw new RangeError("Array limit exceeded. Only " + arrayLimit + " element" + (arrayLimit === 1 ? "" : "s") + " allowed in an array.");
         }
-        var newIndex = getMaxIndex(a) + 1;
-        a[newIndex] = b;
+        var bValues = isArray(b) ? b : [b];
+        var newIndex = getMaxIndex(a);
+        for (var i = 0; i < bValues.length; ++i) {
+          newIndex += 1;
+          a[newIndex] = bValues[i];
+        }
         setMaxIndex(a, newIndex);
         return a;
       }
@@ -8747,6 +8840,7 @@ var require_stringify = __commonJS({
       charsetSentinel: false,
       commaRoundTrip: false,
       delimiter: "&",
+      depth: Infinity,
       encode: true,
       encodeDotInKeys: false,
       encoder: utils.encode,
@@ -8766,8 +8860,11 @@ var require_stringify = __commonJS({
       return typeof v === "string" || typeof v === "number" || typeof v === "boolean" || typeof v === "symbol" || typeof v === "bigint";
     };
     var sentinel = {};
-    var stringify = function stringify2(object, prefix, generateArrayPrefix, commaRoundTrip, allowEmptyArrays, strictNullHandling, skipNulls, encodeDotInKeys, encoder, filter, sort, allowDots, serializeDate, format, formatter, encodeValuesOnly, charset, sideChannel) {
+    var stringify = function stringify2(object, prefix, generateArrayPrefix, commaRoundTrip, allowEmptyArrays, strictNullHandling, skipNulls, encodeDotInKeys, encoder, filter, sort, allowDots, serializeDate, format, formatter, encodeValuesOnly, charset, sideChannel, depth, currentDepth) {
       var obj = object;
+      if (currentDepth > depth) {
+        throw new RangeError("Input depth exceeded depth option of " + depth);
+      }
       var tmpSc = sideChannel;
       var step = 0;
       var findFlag = false;
@@ -8785,9 +8882,8 @@ var require_stringify = __commonJS({
           step = 0;
         }
       }
-      if (typeof filter === "function") {
-        obj = filter(prefix, obj);
-      } else if (obj instanceof Date) {
+      obj = typeof filter === "function" ? filter(prefix, obj) : obj;
+      if (obj instanceof Date) {
         obj = serializeDate(obj);
       } else if (generateArrayPrefix === "comma" && isArray(obj)) {
         obj = utils.maybeMap(obj, function(value2) {
@@ -8830,7 +8926,7 @@ var require_stringify = __commonJS({
       }
       var encodedPrefix = encodeDotInKeys ? String(prefix).replace(/\./g, "%2E") : String(prefix);
       var adjustedPrefix = commaRoundTrip && isArray(obj) && obj.length === 1 ? encodedPrefix + "[]" : encodedPrefix;
-      if (allowEmptyArrays && isArray(obj) && obj.length === 0) {
+      if (allowEmptyArrays && isArray(obj) && obj.length === 0 && Object.keys(obj).length === 0) {
         return adjustedPrefix + "[]";
       }
       for (var j = 0; j < objKeys.length; ++j) {
@@ -8862,7 +8958,9 @@ var require_stringify = __commonJS({
           formatter,
           encodeValuesOnly,
           charset,
-          valueSideChannel
+          valueSideChannel,
+          depth,
+          currentDepth + 1
         ));
       }
       return values;
@@ -8917,6 +9015,7 @@ var require_stringify = __commonJS({
         charsetSentinel: typeof opts.charsetSentinel === "boolean" ? opts.charsetSentinel : defaults.charsetSentinel,
         commaRoundTrip: !!opts.commaRoundTrip,
         delimiter: typeof opts.delimiter === "undefined" ? defaults.delimiter : opts.delimiter,
+        depth: typeof opts.depth === "number" ? opts.depth : defaults.depth,
         encode: typeof opts.encode === "boolean" ? opts.encode : defaults.encode,
         encodeDotInKeys: typeof opts.encodeDotInKeys === "boolean" ? opts.encodeDotInKeys : defaults.encodeDotInKeys,
         encoder: typeof opts.encoder === "function" ? opts.encoder : defaults.encoder,
@@ -8964,9 +9063,10 @@ var require_stringify = __commonJS({
         if (options.skipNulls && value === null) {
           continue;
         }
+        var encodedKey = options.encodeDotInKeys ? String(key).replace(/\./g, "%2E") : String(key);
         pushToArray(keys, stringify(
           value,
-          key,
+          encodedKey,
           generateArrayPrefix,
           commaRoundTrip,
           options.allowEmptyArrays,
@@ -8982,7 +9082,9 @@ var require_stringify = __commonJS({
           options.formatter,
           options.encodeValuesOnly,
           options.charset,
-          sideChannel
+          sideChannel,
+          options.depth,
+          0
         ));
       }
       var joined = keys.join(options.delimiter);
@@ -9035,9 +9137,9 @@ var require_parse = __commonJS({
         return String.fromCharCode(parseInt(numberStr, 10));
       });
     };
-    var parseArrayValue = function(val, options, currentArrayLength, isFlatArrayValue) {
+    var parseArrayValue = function(val, options, currentArrayLength) {
       if (val && typeof val === "string" && options.comma && val.indexOf(",") > -1) {
-        if (isFlatArrayValue && options.throwOnLimitExceeded) {
+        if (options.throwOnLimitExceeded) {
           var commaCount = 0;
           var commaIndex = val.indexOf(",");
           while (commaIndex > -1) {
@@ -9104,8 +9206,7 @@ var require_parse = __commonJS({
               parseArrayValue(
                 part.slice(pos + 1),
                 options,
-                isArray(obj[key]) ? obj[key].length : 0,
-                part.indexOf("[]=") === -1
+                isArray(obj[key]) ? obj[key].length : 0
               ),
               function(encodedVal) {
                 return options.decoder(encodedVal, defaults.decoder, charset, "value");
@@ -9348,6 +9449,11 @@ var require_Util = __commonJS({
   "node_modules/typed-rest-client/Util.js"(exports2) {
     "use strict";
     var __awaiter = exports2 && exports2.__awaiter || function(thisArg, _arguments, P, generator) {
+      function adopt(value) {
+        return value instanceof P ? value : new P(function(resolve) {
+          resolve(value);
+        });
+      }
       return new (P || (P = Promise))(function(resolve, reject) {
         function fulfilled(value) {
           try {
@@ -9364,44 +9470,41 @@ var require_Util = __commonJS({
           }
         }
         function step(result) {
-          result.done ? resolve(result.value) : new P(function(resolve2) {
-            resolve2(result.value);
-          }).then(fulfilled, rejected);
+          result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
         }
         step((generator = generator.apply(thisArg, _arguments || [])).next());
       });
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.getUrl = getUrl;
+    exports2.decompressGzippedContent = decompressGzippedContent;
+    exports2.buildProxyBypassRegexFromEnv = buildProxyBypassRegexFromEnv;
+    exports2.obtainContentCharset = obtainContentCharset;
     var qs = require_lib();
-    var url = require("url");
-    var path2 = require("path");
     var zlib = require("zlib");
     function getUrl(resource, baseUrl, queryParams) {
-      const pathApi = path2.posix || path2;
       let requestUrl = "";
       if (!baseUrl) {
         requestUrl = resource;
       } else if (!resource) {
         requestUrl = baseUrl;
       } else {
-        const base = url.parse(baseUrl);
-        const resultantUrl = url.parse(resource);
-        resultantUrl.protocol = resultantUrl.protocol || base.protocol;
-        resultantUrl.auth = resultantUrl.auth || base.auth;
-        resultantUrl.host = resultantUrl.host || base.host;
-        resultantUrl.pathname = pathApi.resolve(base.pathname, resultantUrl.pathname);
+        const effectiveBase = new URL(baseUrl);
+        if (!effectiveBase.pathname.endsWith("/")) {
+          effectiveBase.pathname += "/";
+        }
+        const resultantUrl = new URL(resource, effectiveBase.href);
         if (!resultantUrl.pathname.endsWith("/") && resource.endsWith("/")) {
           resultantUrl.pathname += "/";
         }
-        requestUrl = url.format(resultantUrl);
+        requestUrl = resultantUrl.href;
       }
       return queryParams ? getUrlWithParsedQueryParams(requestUrl, queryParams) : requestUrl;
     }
-    exports2.getUrl = getUrl;
     function getUrlWithParsedQueryParams(requestUrl, queryParams) {
-      const url2 = requestUrl.replace(/\?$/g, "");
+      const url = requestUrl.replace(/\?$/g, "");
       const parsedQueryParams = qs.stringify(queryParams.params, buildParamsStringifyOptions(queryParams));
-      return `${url2}${parsedQueryParams}`;
+      return `${url}${parsedQueryParams}`;
     }
     function buildParamsStringifyOptions(queryParams) {
       let options = {
@@ -9426,7 +9529,6 @@ var require_Util = __commonJS({
         }));
       });
     }
-    exports2.decompressGzippedContent = decompressGzippedContent;
     function buildProxyBypassRegexFromEnv(bypass) {
       try {
         return new RegExp(bypass, "i");
@@ -9438,14 +9540,15 @@ var require_Util = __commonJS({
         throw err;
       }
     }
-    exports2.buildProxyBypassRegexFromEnv = buildProxyBypassRegexFromEnv;
     function obtainContentCharset(response) {
       const nodeSupportedEncodings = ["ascii", "utf8", "utf16le", "ucs2", "base64", "binary", "hex"];
       const contentType = response.message.headers["content-type"] || "";
       const matches = contentType.match(/charset=([^;,\r\n]+)/i);
-      return matches && matches[1] && nodeSupportedEncodings.indexOf(matches[1]) != -1 ? matches[1] : "utf-8";
+      if (matches && matches[1] && nodeSupportedEncodings.indexOf(matches[1]) != -1) {
+        return matches[1];
+      }
+      return "utf-8";
     }
-    exports2.obtainContentCharset = obtainContentCharset;
   }
 });
 
@@ -9691,6 +9794,11 @@ var require_HttpClient = __commonJS({
   "node_modules/typed-rest-client/HttpClient.js"(exports2) {
     "use strict";
     var __awaiter = exports2 && exports2.__awaiter || function(thisArg, _arguments, P, generator) {
+      function adopt(value) {
+        return value instanceof P ? value : new P(function(resolve) {
+          resolve(value);
+        });
+      }
       return new (P || (P = Promise))(function(resolve, reject) {
         function fulfilled(value) {
           try {
@@ -9707,15 +9815,14 @@ var require_HttpClient = __commonJS({
           }
         }
         function step(result) {
-          result.done ? resolve(result.value) : new P(function(resolve2) {
-            resolve2(result.value);
-          }).then(fulfilled, rejected);
+          result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
         }
         step((generator = generator.apply(thisArg, _arguments || [])).next());
       });
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
-    var url = require("url");
+    exports2.HttpClient = exports2.HttpClientResponse = exports2.HttpCodes = void 0;
+    exports2.isHttps = isHttps;
     var http = require("http");
     var https = require("https");
     var util = require_Util();
@@ -9750,10 +9857,10 @@ var require_HttpClient = __commonJS({
       HttpCodes2[HttpCodes2["BadGateway"] = 502] = "BadGateway";
       HttpCodes2[HttpCodes2["ServiceUnavailable"] = 503] = "ServiceUnavailable";
       HttpCodes2[HttpCodes2["GatewayTimeout"] = 504] = "GatewayTimeout";
-    })(HttpCodes = exports2.HttpCodes || (exports2.HttpCodes = {}));
+    })(HttpCodes || (exports2.HttpCodes = HttpCodes = {}));
     var HttpRedirectCodes = [HttpCodes.MovedPermanently, HttpCodes.ResourceMoved, HttpCodes.SeeOther, HttpCodes.TemporaryRedirect, HttpCodes.PermanentRedirect];
     var HttpResponseRetryCodes = [HttpCodes.BadGateway, HttpCodes.ServiceUnavailable, HttpCodes.GatewayTimeout];
-    var NetworkRetryErrors = ["ECONNRESET", "ENOTFOUND", "ESOCKETTIMEDOUT", "ETIMEDOUT", "ECONNREFUSED"];
+    var NetworkRetryErrors = ["ECONNRESET", "ENOTFOUND", "ESOCKETTIMEDOUT", "ETIMEDOUT", "ECONNREFUSED", "EHOSTUNREACH"];
     var RetryableHttpVerbs = ["OPTIONS", "GET", "DELETE", "HEAD"];
     var ExponentialBackoffCeiling = 10;
     var ExponentialBackoffTimeSlice = 5;
@@ -9788,10 +9895,9 @@ var require_HttpClient = __commonJS({
     };
     exports2.HttpClientResponse = HttpClientResponse;
     function isHttps(requestUrl) {
-      let parsedUrl = url.parse(requestUrl);
+      const parsedUrl = new URL(requestUrl);
       return parsedUrl.protocol === "https:";
     }
-    exports2.isHttps = isHttps;
     var EnvironmentVariables;
     (function(EnvironmentVariables2) {
       EnvironmentVariables2["HTTP_PROXY"] = "HTTP_PROXY";
@@ -9808,6 +9914,10 @@ var require_HttpClient = __commonJS({
         this._maxRetries = 1;
         this._keepAlive = false;
         this._disposed = false;
+        this._httpGlobalAgentOptions = {
+          keepAlive: false,
+          timeout: 3e4
+        };
         this.userAgent = userAgent;
         this.handlers = handlers || [];
         let no_proxy = process.env[EnvironmentVariables.NO_PROXY];
@@ -9829,6 +9939,9 @@ var require_HttpClient = __commonJS({
             requestOptions.proxy.proxyBypassHosts.forEach((bypass) => {
               this._httpProxyBypassHosts.push(new RegExp(bypass, "i"));
             });
+          }
+          if (requestOptions.globalAgentOptions) {
+            this._httpGlobalAgentOptions = requestOptions.globalAgentOptions;
           }
           this._certConfig = requestOptions.cert;
           if (this._certConfig) {
@@ -9897,7 +10010,7 @@ var require_HttpClient = __commonJS({
           if (this._disposed) {
             throw new Error("Client has already been disposed.");
           }
-          let parsedUrl = url.parse(requestUrl);
+          const parsedUrl = new URL(requestUrl);
           let info = this._prepareRequest(verb, parsedUrl, headers);
           let maxTries = this._allowRetries && RetryableHttpVerbs.indexOf(verb) != -1 ? this._maxRetries + 1 : 1;
           let numTries = 0;
@@ -9933,7 +10046,7 @@ var require_HttpClient = __commonJS({
               if (!redirectUrl) {
                 break;
               }
-              let parsedRedirectUrl = url.parse(redirectUrl);
+              const parsedRedirectUrl = new URL(redirectUrl, parsedUrl.href);
               if (parsedUrl.protocol == "https:" && parsedUrl.protocol != parsedRedirectUrl.protocol && !this._allowRedirectDowngrade) {
                 throw new Error("Redirect from HTTPS to HTTP protocol. This downgrade is not allowed for security reasons. If you want to allow this behavior, set the allowRedirectDowngrade option to true.");
               }
@@ -10028,13 +10141,13 @@ var require_HttpClient = __commonJS({
       _prepareRequest(method, requestUrl, headers) {
         const info = {};
         info.parsedUrl = requestUrl;
-        const usingSsl = info.parsedUrl.protocol === "https:";
+        const usingSsl = requestUrl.protocol === "https:";
         info.httpModule = usingSsl ? https : http;
         const defaultPort = usingSsl ? 443 : 80;
         info.options = {};
-        info.options.host = info.parsedUrl.hostname;
-        info.options.port = info.parsedUrl.port ? parseInt(info.parsedUrl.port) : defaultPort;
-        info.options.path = (info.parsedUrl.pathname || "") + (info.parsedUrl.search || "");
+        info.options.host = requestUrl.hostname;
+        info.options.port = requestUrl.port ? parseInt(requestUrl.port) : defaultPort;
+        info.options.path = requestUrl.pathname + requestUrl.search;
         info.options.method = method;
         info.options.timeout = this.requestOptions && this.requestOptions.socketTimeout || this._socketTimeout;
         this._socketTimeout = info.options.timeout;
@@ -10042,8 +10155,8 @@ var require_HttpClient = __commonJS({
         if (this.userAgent != null) {
           info.options.headers["user-agent"] = this.userAgent;
         }
-        info.options.agent = this._getAgent(info.parsedUrl);
-        if (this.handlers && !this._isPresigned(url.format(requestUrl))) {
+        info.options.agent = this._getAgent(requestUrl);
+        if (this.handlers && !this._isPresigned(requestUrl.href)) {
           this.handlers.forEach((handler) => {
             handler.prepareRequest(info.options);
           });
@@ -10096,7 +10209,7 @@ var require_HttpClient = __commonJS({
             proxy: {
               proxyAuth: proxy.proxyAuth,
               host: proxy.proxyUrl.hostname,
-              port: proxy.proxyUrl.port
+              port: Number(proxy.proxyUrl.port) || (proxy.proxyUrl.protocol === "https:" ? 443 : 80)
             }
           };
           let tunnelAgent;
@@ -10115,7 +10228,11 @@ var require_HttpClient = __commonJS({
           this._agent = agent;
         }
         if (!agent) {
-          agent = usingSsl ? https.globalAgent : http.globalAgent;
+          const globalAgentOptions = {
+            keepAlive: this._httpGlobalAgentOptions.keepAlive,
+            timeout: this._httpGlobalAgentOptions.timeout
+          };
+          agent = usingSsl ? new https.Agent(globalAgentOptions) : new http.Agent(globalAgentOptions);
         }
         if (usingSsl && this._ignoreSslError) {
           agent.options = Object.assign(agent.options || {}, { rejectUnauthorized: false });
@@ -10145,7 +10262,7 @@ var require_HttpClient = __commonJS({
         let proxyAuth;
         if (proxyConfig) {
           if (proxyConfig.proxyUrl.length > 0) {
-            proxyUrl = url.parse(proxyConfig.proxyUrl);
+            proxyUrl = new URL(proxyConfig.proxyUrl);
           }
           if (proxyConfig.proxyUsername || proxyConfig.proxyPassword) {
             proxyAuth = proxyConfig.proxyUsername + ":" + proxyConfig.proxyPassword;
@@ -11348,7 +11465,7 @@ var require_package = __commonJS({
   "node_modules/azure-pipelines-tool-lib/package.json"(exports2, module2) {
     module2.exports = {
       name: "azure-pipelines-tool-lib",
-      version: "2.0.12",
+      version: "2.280.1",
       description: "Azure Pipelines Tool Installer Lib for CI/CD Tasks",
       main: "tool.js",
       scripts: {
@@ -11373,10 +11490,10 @@ var require_package = __commonJS({
       dependencies: {
         "@types/semver": "^5.3.0",
         "@types/uuid": "^3.4.5",
-        "azure-pipelines-task-lib": "^5.2.7",
+        "azure-pipelines-task-lib": "^5.280.1",
         semver: "^5.7.0",
         "semver-compare": "^1.0.0",
-        "typed-rest-client": "^1.8.6",
+        "typed-rest-client": "^3.1.2",
         uuid: "^3.3.2"
       },
       devDependencies: {
@@ -11385,11 +11502,15 @@ var require_package = __commonJS({
         "@types/shelljs": "^0.8.4",
         "@types/xml2js": "^0.4.5",
         mocha: "^6.2.3",
-        nock: "13.0.4",
-        shelljs: "^0.8.5",
+        nock: "13.5.6",
+        shelljs: "^0.10.0",
         typescript: "^4.0.5",
         xml2js: "^0.4.23",
         nyc: "^17.0.0"
+      },
+      overrides: {
+        minimatch: "^3.1.5",
+        "js-yaml@3.x": { ".": "^3.15.2" }
       }
     };
   }
