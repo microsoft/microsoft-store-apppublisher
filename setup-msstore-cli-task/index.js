@@ -11145,7 +11145,7 @@ var require_HttpClient = __commonJS({
             keepAlive: this._keepAlive,
             proxy: {
               proxyAuth: proxy.proxyAuth,
-              host: proxy.proxyUrl.hostname,
+              host: proxy.proxyUrl.hostname.replace(/^\[(.*)\]$/, "$1"),
               port: Number(proxy.proxyUrl.port) || (proxy.proxyUrl.protocol === "https:" ? 443 : 80)
             }
           };
