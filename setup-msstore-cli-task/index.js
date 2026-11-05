@@ -116,6 +116,8 @@ var require_brace_expansion = __commonJS({
     var escClose = "\0CLOSE" + Math.random() + "\0";
     var escComma = "\0COMMA" + Math.random() + "\0";
     var escPeriod = "\0PERIOD" + Math.random() + "\0";
+    var EXPANSION_MAX = 1e5;
+    var EXPANSION_MAX_LENGTH = 4e6;
     function numeric(str) {
       return parseInt(str, 10) == str ? parseInt(str, 10) : str.charCodeAt(0);
     }
@@ -149,11 +151,12 @@ var require_brace_expansion = __commonJS({
       if (!str)
         return [];
       options = options || {};
-      var max = options.max == null ? Infinity : options.max;
+      var max = options.max == null ? EXPANSION_MAX : options.max;
+      var maxLength = options.maxLength == null ? EXPANSION_MAX_LENGTH : options.maxLength;
       if (str.substr(0, 2) === "{}") {
         str = "\\{\\}" + str.substr(2);
       }
-      return expand(escapeBraces(str), max, true).map(unescapeBraces);
+      return expand(escapeBraces(str), max, maxLength, true).map(unescapeBraces);
     }
     function embrace(str) {
       return "{" + str + "}";
@@ -167,11 +170,82 @@ var require_brace_expansion = __commonJS({
     function gte(i, y) {
       return i >= y;
     }
-    function expand(str, max, isTop) {
-      var expansions = [];
+    function combine(acc, base, pre, values, max, maxLength, dropEmpties, outBase) {
+      var out = [];
+      var length = 0;
+      for (var a = 0; a < acc.length; a++) {
+        for (var v = 0; v < values.length; v++) {
+          if (out.length >= max) return out;
+          var expansion = acc[a] + pre + values[v];
+          if (dropEmpties && expansion.length === base[a]) continue;
+          if (length + expansion.length > maxLength) return out;
+          out.push(expansion);
+          outBase.push(base[a]);
+          length += expansion.length;
+        }
+      }
+      return out;
+    }
+    function expandSequence(body, isAlphaSequence, max, maxLength) {
+      var n = body.split(/\.\./);
+      var N = [];
+      if (n[0] === void 0 || n[1] === void 0) {
+        return N;
+      }
+      var x = numeric(n[0]);
+      var y = numeric(n[1]);
+      var width = Math.max(n[0].length, n[1].length);
+      var incr = n.length === 3 && n[2] !== void 0 ? Math.max(Math.abs(numeric(n[2])), 1) : 1;
+      var test = lte;
+      var reverse = y < x;
+      if (reverse) {
+        incr *= -1;
+        test = gte;
+      }
+      var pad = n.some(isPadded);
+      var length = 0;
+      for (var i = x; test(i, y) && N.length < max; i += incr) {
+        var c;
+        if (isAlphaSequence) {
+          c = String.fromCharCode(i);
+          if (c === "\\") {
+            c = "";
+          }
+        } else {
+          c = String(i);
+          if (pad) {
+            var need = width - c.length;
+            if (need > 0) {
+              var z = new Array(need + 1).join("0");
+              if (i < 0) {
+                c = "-" + z + c.slice(1);
+              } else {
+                c = z + c;
+              }
+            }
+          }
+        }
+        if (length + c.length > maxLength) break;
+        N.push(c);
+        length += c.length;
+      }
+      return N;
+    }
+    function expand(str, max, maxLength, isTop) {
+      var acc = [""];
+      var accBase = [0];
+      var dropEmpties = false;
+      var firstGroup = true;
+      var nextBase;
       for (; ; ) {
         var m = balanced("{", "}", str);
-        if (!m || /\$$/.test(m.pre)) return [str];
+        if (!m) {
+          return combine(acc, accBase, str, [""], max, maxLength, dropEmpties, []);
+        }
+        var pre = m.pre;
+        if (/\$$/.test(pre)) {
+          return combine(acc, accBase, str, [""], max, maxLength, dropEmpties, []);
+        }
         var isNumericSequence = /^-?\d+\.\.-?\d+(?:\.\.-?\d+)?$/.test(m.body);
         var isAlphaSequence = /^[a-zA-Z]\.\.[a-zA-Z](?:\.\.-?\d+)?$/.test(m.body);
         var isSequence = isNumericSequence || isAlphaSequence;
@@ -180,76 +254,91 @@ var require_brace_expansion = __commonJS({
           if (m.post.match(/,(?!,).*\}/)) {
             str = m.pre + "{" + m.body + escClose + m.post;
             isTop = true;
+            firstGroup = true;
+            dropEmpties = false;
+            accBase = [];
+            for (var b = 0; b < acc.length; b++) {
+              accBase.push(acc[b].length);
+            }
             continue;
           }
-          return [str];
+          return combine(
+            acc,
+            accBase,
+            pre + "{" + m.body + "}" + m.post,
+            [""],
+            max,
+            maxLength,
+            dropEmpties,
+            []
+          );
         }
-        var n;
+        if (firstGroup) {
+          dropEmpties = isTop && !isSequence;
+          firstGroup = false;
+        }
+        var values;
         if (isSequence) {
-          n = m.body.split(/\.\./);
+          values = expandSequence(m.body, isAlphaSequence, max, maxLength);
         } else {
-          n = parseCommaParts(m.body);
-          if (n.length === 1) {
-            n = expand(n[0], max, false).map(embrace);
+          var n = parseCommaParts(m.body);
+          if (n.length === 1 && n[0] !== void 0) {
+            n = expand(n[0], max, maxLength, false).map(embrace);
             if (n.length === 1) {
-              var post = m.post.length ? expand(m.post, max, false) : [""];
-              return post.map(function(p) {
-                return m.pre + n[0] + p;
-              });
+              nextBase = [];
+              acc = combine(
+                acc,
+                accBase,
+                pre + n[0],
+                [""],
+                max,
+                maxLength,
+                dropEmpties && !m.post.length,
+                nextBase
+              );
+              accBase = nextBase;
+              if (!m.post.length) break;
+              str = m.post;
+              continue;
             }
           }
-        }
-        var pre = m.pre;
-        var post = m.post.length ? expand(m.post, max, false) : [""];
-        var N;
-        if (isSequence) {
-          var x = numeric(n[0]);
-          var y = numeric(n[1]);
-          var width = Math.max(n[0].length, n[1].length);
-          var incr = n.length == 3 ? Math.max(Math.abs(numeric(n[2])), 1) : 1;
-          var test = lte;
-          var reverse = y < x;
-          if (reverse) {
-            incr *= -1;
-            test = gte;
+          var dropsEmpties = dropEmpties && !m.post.length && !pre;
+          for (var d = 0; dropsEmpties && d < acc.length; d++) {
+            if (acc[d].length !== accBase[d]) {
+              dropsEmpties = false;
+            }
           }
-          var pad = n.some(isPadded);
-          N = [];
-          for (var i = x; test(i, y) && N.length < max; i += incr) {
-            var c;
-            if (isAlphaSequence) {
-              c = String.fromCharCode(i);
-              if (c === "\\")
-                c = "";
-            } else {
-              c = String(i);
-              if (pad) {
-                var need = width - c.length;
-                if (need > 0) {
-                  var z = new Array(need + 1).join("0");
-                  if (i < 0)
-                    c = "-" + z + c.slice(1);
-                  else
-                    c = z + c;
-                }
+          values = [];
+          var valuesLength = 0;
+          outer: for (var j = 0; j < n.length; j++) {
+            var expanded = expand(n[j], max, maxLength, false);
+            for (var k = 0; k < expanded.length; k++) {
+              var v = expanded[k];
+              if (dropsEmpties && !v) continue;
+              if (values.length >= max || valuesLength + v.length > maxLength) {
+                break outer;
               }
+              values.push(v);
+              valuesLength += v.length;
             }
-            N.push(c);
-          }
-        } else {
-          N = concatMap(n, function(el) {
-            return expand(el, max, false);
-          });
-        }
-        for (var j = 0; j < N.length; j++) {
-          for (var k = 0; k < post.length && expansions.length < max; k++) {
-            var expansion = pre + N[j] + post[k];
-            if (!isTop || isSequence || expansion)
-              expansions.push(expansion);
           }
         }
-        return expansions;
+        nextBase = [];
+        acc = combine(
+          acc,
+          accBase,
+          pre,
+          values,
+          max,
+          maxLength,
+          dropEmpties && !m.post.length,
+          nextBase
+        );
+        accBase = nextBase;
+        if (!m.post.length) break;
+        str = m.post;
       }
+      return acc;
     }
   }
 });
@@ -1076,7 +1165,17 @@ var require_vault = __commonJS({
           return crypto2.createHash("sha256").update(key).digest();
         };
         Vault2.prototype.genKey = function() {
-          fs3.writeFileSync(this._keyFile, crypto2.randomUUID(), { encoding: "utf8" });
+          var key;
+          if (crypto2.randomUUID) {
+            key = crypto2.randomUUID();
+          } else {
+            var bytes = crypto2.randomBytes(16);
+            bytes[6] = bytes[6] & 15 | 64;
+            bytes[8] = bytes[8] & 63 | 128;
+            var hex = bytes.toString("hex");
+            key = hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" + hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+          }
+          fs3.writeFileSync(this._keyFile, key, { encoding: "utf8" });
         };
         return Vault2;
       })()
@@ -2160,6 +2259,456 @@ var require_semver = __commonJS({
   }
 });
 
+// node_modules/azure-pipelines-task-lib/lib-resource.js
+var require_lib_resource = __commonJS({
+  "node_modules/azure-pipelines-task-lib/lib-resource.js"(exports2, module2) {
+    module2.exports = {
+      "messages": {
+        "LIB_CopyDirectoryWithoutRecursiveOption": "cp: cannot copy a directory '%s' without the recursive option",
+        "LIB_CopyFileFailed": "Error while copying the file. Attempts left: %s",
+        "LIB_DirectoryStackEmpty": "Directory stack is empty",
+        "LIB_EndpointAuthNotExist": "Endpoint auth data not present: %s",
+        "LIB_EndpointDataNotExist": "Endpoint data parameter %s not present: %s",
+        "LIB_EndpointNotExist": "Endpoint not present: %s",
+        "LIB_FailOnCode": "Failure return code: %d",
+        "LIB_InputRequired": "Input required: %s",
+        "LIB_InvalidEndpointAuth": "Invalid endpoint auth: %s",
+        "LIB_InvalidPattern": "Invalid pattern: '%s'",
+        "LIB_InvalidSecureFilesInput": "Invalid secure file input: %s",
+        "LIB_LocStringNotFound": "Can\\'t find loc string for key: %s",
+        "LIB_MergeTestResultNotSupported": "Merging test results from multiple files to one test run is not supported on this version of build agent for OSX/Linux, each test result file will be published as a separate test run in VSO/TFS.",
+        "LIB_MkdirFailed": "Unable to create directory '%s'. %s",
+        "LIB_MkdirFailedFileExists": "Unable to create directory '%s'. Conflicting file exists: '%s'",
+        "LIB_MkdirFailedInvalidDriveRoot": "Unable to create directory '%s'. Root directory does not exist: '%s'",
+        "LIB_MkdirFailedInvalidShare": "Unable to create directory '%s'. Unable to verify the directory exists: '%s'. If directory is a file share, please verify the share name is correct, the share is online, and the current process has permission to access the share.",
+        "LIB_MultilineSecret": "Secrets cannot contain multiple lines",
+        "LIB_NotFoundPreviousDirectory": "Could not find previous directory",
+        "LIB_OperationFailed": "Failed %s: %s",
+        "LIB_ParameterIsRequired": "%s not supplied",
+        "LIB_PathHasNullByte": "Path cannot contain null bytes",
+        "LIB_PathIsNotADirectory": "Path is not a directory: %s",
+        "LIB_PathNotFound": "Not found %s: %s",
+        "LIB_PlatformNotSupported": "Platform not supported: %s",
+        "LIB_ProcessError": "There was an error when attempting to execute the process '%s'. This may indicate the process failed to start. Error: %s",
+        "LIB_ProcessExitCode": "The process '%s' failed with exit code %s",
+        "LIB_ProcessStderr": "The process '%s' failed because one or more lines were written to the STDERR stream",
+        "LIB_ResourceFileAlreadySet": "Resource file has already set to: %s",
+        "LIB_ResourceFileNotExist": "Resource file doesn\\'t exist: %s",
+        "LIB_ResourceFileNotSet": "Resource file haven\\'t set, can\\'t find loc string for key: %s",
+        "LIB_ReturnCode": "Return code: %d",
+        "LIB_StdioNotClosed": "The STDIO streams did not close within %s seconds of the exit event from process '%s'. This may indicate a child process inherited the STDIO streams and has not yet exited.",
+        "LIB_UndefinedNodeVersion": "Node version is undefined.",
+        "LIB_UnhandledEx": "Unhandled: %s",
+        "LIB_UseFirstGlobMatch": "Multiple workspace matches. using first.",
+        "LIB_WhichNotFound_Linux": "Unable to locate executable file: '%s'. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file mode to verify the file is executable.",
+        "LIB_WhichNotFound_Win": "Unable to locate executable file: '%s'. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also verify the file has a valid extension for an executable file."
+      },
+      "localizedMessages": {
+        "de-DE": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: Das Verzeichnis \u201E%s\u201C kann ohne die Option \u201ERekursiv\u201C nicht kopiert werden.",
+          "loc.messages.LIB_CopyFileFailed": "Fehler beim Kopieren der Datei. Verbleibende Versuche: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "Der Verzeichnisstapel ist leer.",
+          "loc.messages.LIB_EndpointAuthNotExist": "Die Endpunkt-Authentifizierungsdatensind nicht vorhanden: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "Der Endpunkt-Datenparameter %s ist nicht vorhanden: %s",
+          "loc.messages.LIB_EndpointNotExist": "Der Endpunkt ist nicht vorhanden: %s",
+          "loc.messages.LIB_FailOnCode": "Fehler beim R\xFCckgabecode: %d",
+          "loc.messages.LIB_InputRequired": "Eingabe erforderlich: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "Ung\xFCltige Endpunktauthentifizierung: %s",
+          "loc.messages.LIB_InvalidPattern": 'Ung\xFCltiges Muster: "%s"',
+          "loc.messages.LIB_InvalidSecureFilesInput": "Ung\xFCltige sichere Dateiausgabe: %s",
+          "loc.messages.LIB_LocStringNotFound": "Die Lokalisierungszeichenfolge f\xFCr den folgenden Schl\xFCssel wurde nicht gefunden: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "Das Mergen von Testergebnissen aus mehreren Dateien in einen Testlauf wird von dieser Version des Build-Agents f\xFCr OSX/Linux nicht unterst\xFCtzt. Jede Testergebnisdatei wird als separater Testlauf in VSO/TFS ver\xF6ffentlicht.",
+          "loc.messages.LIB_MkdirFailed": 'Das Verzeichnis "%s" kann nicht erstellt werden. %s',
+          "loc.messages.LIB_MkdirFailedFileExists": 'Das Verzeichnis "%s" kann nicht erstellt werden. Eine in Konflikt stehende Datei ist vorhanden: "%s"',
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": 'Das Verzeichnis "%s" kann nicht erstellt werden. Das Stammverzeichnis ist nicht vorhanden: %s',
+          "loc.messages.LIB_MkdirFailedInvalidShare": 'Das Verzeichnis "%s" kann nicht erstellt werden. Es kann nicht \xFCberpr\xFCft werden, ob das Verzeichnis vorhanden ist: {%s}. Wenn das Verzeichnis eine Dateifreigabe ist, stellen Sie sicher, dass der Freigabename richtig, die Freigabe online und der aktuelle Prozess berechtigt ist, auf die Freigabe zuzugreifen.',
+          "loc.messages.LIB_MultilineSecret": "Geheimnisse d\xFCrfen nicht mehrere Zeilen enthalten",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "Vorheriges Verzeichnis wurde nicht gefunden.",
+          "loc.messages.LIB_OperationFailed": "Fehler %s: %s",
+          "loc.messages.LIB_ParameterIsRequired": '"%s" wurde nicht angegeben.',
+          "loc.messages.LIB_PathHasNullByte": "Der Pfad darf keine NULL-Bytes enthalten.",
+          "loc.messages.LIB_PathIsNotADirectory": "Der Pfad ist kein Verzeichnis: %s",
+          "loc.messages.LIB_PathNotFound": "Nicht gefunden %s: %s",
+          "loc.messages.LIB_PlatformNotSupported": "Plattform wird nicht unterst\xFCtzt: %s",
+          "loc.messages.LIB_ProcessError": 'Fehler beim Ausf\xFChren des Prozesses "%s". M\xF6glicherweise konnte der Prozess nicht gestartet werden. Fehler: %s',
+          "loc.messages.LIB_ProcessExitCode": 'Fehler beim Prozess "%s" mit Exitcode %s.',
+          "loc.messages.LIB_ProcessStderr": 'Fehler beim Prozess "%s": Mindestens eine Zeile wurde in den STDERR-Datenstrom geschrieben.',
+          "loc.messages.LIB_ResourceFileAlreadySet": "Die Ressourcendatei wurde bereits festgelegt auf: %s",
+          "loc.messages.LIB_ResourceFileNotExist": "Die Ressourcendatei ist nicht vorhanden: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "Die Ressourcendatei wurde nicht festgelegt. Die Lokalisierungszeichenfolge f\xFCr den folgenden Schl\xFCssel wurde nicht gefunden: %s",
+          "loc.messages.LIB_ReturnCode": "R\xFCckgabecode: %d",
+          "loc.messages.LIB_StdioNotClosed": 'Die STDIO-Datenstr\xF6me wurden nicht innerhalb von %s\xA0Sekunden nach dem Beendigungsereignis aus dem Prozess "%s" geschlossen. M\xF6glicherweise hat ein untergeordneter Prozess die STDIO-Datenstr\xF6me geerbt und wurde noch nicht beendet.',
+          "loc.messages.LIB_UndefinedNodeVersion": "Die Knotenversion ist nicht definiert.",
+          "loc.messages.LIB_UnhandledEx": "Ausnahmefehler: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "Mehrere Arbeitsbereich\xFCbereinstimmungen. Die erste \xDCbereinstimmung wird verwendet.",
+          "loc.messages.LIB_WhichNotFound_Linux": "Ausf\xFChrbare Datei nicht gefunden: '%s'. Pr\xFCfen Sie, ob der Dateipfad vorhanden ist oder sich die Datei in einem von der PATH-Umgebungsvariablen angegebenen Verzeichnis befindet. Pr\xFCfen Sie zudem den Dateimodus, um sicherzustellen, dass die Datei ausf\xFChrbar ist.",
+          "loc.messages.LIB_WhichNotFound_Win": 'Ausf\xFChrbare Datei nicht gefunden: "%s". Pr\xFCfen Sie, ob der Dateipfad vorhanden ist oder sich die Datei in einem von der PATH-Umgebungsvariablen angegebenen Verzeichnis befindet. Pr\xFCfen Sie zudem, ob die Datei eine g\xFCltige Erweiterung f\xFCr eine ausf\xFChrbare Datei aufweist.'
+        },
+        "en-US": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: cannot copy a directory '%s' without the recursive option",
+          "loc.messages.LIB_CopyFileFailed": "Error while copying the file. Attempts left: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "Directory stack is empty",
+          "loc.messages.LIB_EndpointAuthNotExist": "Endpoint auth data not present: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "Endpoint data parameter %s not present: %s",
+          "loc.messages.LIB_EndpointNotExist": "Endpoint not present: %s",
+          "loc.messages.LIB_FailOnCode": "Failure return code: %d",
+          "loc.messages.LIB_InputRequired": "Input required: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "Invalid endpoint auth: %s",
+          "loc.messages.LIB_InvalidPattern": "Invalid pattern: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "Invalid secure file input: %s",
+          "loc.messages.LIB_LocStringNotFound": "Can\\'t find loc string for key: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "Merging test results from multiple files to one test run is not supported on this version of build agent for OSX/Linux, each test result file will be published as a separate test run in VSO/TFS.",
+          "loc.messages.LIB_MkdirFailed": "Unable to create directory '%s'. %s",
+          "loc.messages.LIB_MkdirFailedFileExists": "Unable to create directory '%s'. Conflicting file exists: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "Unable to create directory '%s'. Root directory does not exist: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "Unable to create directory '%s'. Unable to verify the directory exists: '%s'. If directory is a file share, please verify the share name is correct, the share is online, and the current process has permission to access the share.",
+          "loc.messages.LIB_MultilineSecret": "Secrets cannot contain multiple lines",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "Could not find previous directory",
+          "loc.messages.LIB_OperationFailed": "Failed %s: %s",
+          "loc.messages.LIB_ParameterIsRequired": "%s not supplied",
+          "loc.messages.LIB_PathHasNullByte": "Path cannot contain null bytes",
+          "loc.messages.LIB_PathIsNotADirectory": "Path is not a directory: %s",
+          "loc.messages.LIB_PathNotFound": "Not found %s: %s",
+          "loc.messages.LIB_PlatformNotSupported": "Platform not supported: %s",
+          "loc.messages.LIB_ProcessError": "There was an error when attempting to execute the process '%s'. This may indicate the process failed to start. Error: %s",
+          "loc.messages.LIB_ProcessExitCode": "The process '%s' failed with exit code %s",
+          "loc.messages.LIB_ProcessStderr": "The process '%s' failed because one or more lines were written to the STDERR stream",
+          "loc.messages.LIB_ResourceFileAlreadySet": "Resource file has already set to: %s",
+          "loc.messages.LIB_ResourceFileNotExist": "Resource file doesn\\'t exist: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "Resource file haven\\'t set, can\\'t find loc string for key: %s",
+          "loc.messages.LIB_ReturnCode": "Return code: %d",
+          "loc.messages.LIB_StdioNotClosed": "The STDIO streams did not close within %s seconds of the exit event from process '%s'. This may indicate a child process inherited the STDIO streams and has not yet exited.",
+          "loc.messages.LIB_UndefinedNodeVersion": "Node version is undefined.",
+          "loc.messages.LIB_UnhandledEx": "Unhandled: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "Multiple workspace matches. using first.",
+          "loc.messages.LIB_WhichNotFound_Linux": "Unable to locate executable file: '%s'. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also check the file mode to verify the file is executable.",
+          "loc.messages.LIB_WhichNotFound_Win": "Unable to locate executable file: '%s'. Please verify either the file path exists or the file can be found within a directory specified by the PATH environment variable. Also verify the file has a valid extension for an executable file."
+        },
+        "es-ES": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: no se puede copiar un directorio''%s'' sin la opci\xF3n recursiva",
+          "loc.messages.LIB_CopyFileFailed": "Error al copiar el archivo. Intentos restantes: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "La pila de directorios est\xE1 vac\xEDa",
+          "loc.messages.LIB_EndpointAuthNotExist": "Los datos de autenticaci\xF3n del punto de conexi\xF3n no existen: %s.",
+          "loc.messages.LIB_EndpointDataNotExist": "El par\xE1metro %s de datos del punto de conexi\xF3n no existe: %s.",
+          "loc.messages.LIB_EndpointNotExist": "No hay punto de conexi\xF3n: %s",
+          "loc.messages.LIB_FailOnCode": "C\xF3digo de retorno de error: %d",
+          "loc.messages.LIB_InputRequired": "Entrada requerida: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "Autenticaci\xF3n de punto de conexi\xF3n no v\xE1lida: %s",
+          "loc.messages.LIB_InvalidPattern": "Patr\xF3n no v\xE1lido: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "Entrada de archivo seguro no v\xE1lida: %s",
+          "loc.messages.LIB_LocStringNotFound": "No se encuentra la cadena localizada para la clave: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "Esta versi\xF3n del agente de compilaci\xF3n para OSX/Linux no admite la fusi\xF3n mediante combinaci\xF3n de resultados de pruebas de varios archivos en una serie de pruebas. Cada archivo de resultados de pruebas se publicar\xE1 como una serie de pruebas diferente en VSO/TFS.",
+          "loc.messages.LIB_MkdirFailed": "No se puede crear el directorio '%s'. %s",
+          "loc.messages.LIB_MkdirFailedFileExists": "No se puede crear el directorio '%s'. Hay un conflicto entre archivos: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "No se puede crear el directorio '%s'. El directorio ra\xEDz no existe: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "No se puede crear el directorio '%s'. No se puede comprobar si el directorio existe: '%s'. Si el directorio es un recurso compartido de archivos, compruebe que el nombre es correcto, que est\xE1 en l\xEDnea y que el proceso actual tiene permiso de acceso a este.",
+          "loc.messages.LIB_MultilineSecret": "Los secretos no pueden contener varias l\xEDneas.",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "No se ha encontrado el directorio anterior",
+          "loc.messages.LIB_OperationFailed": "Error de %s: %s",
+          "loc.messages.LIB_ParameterIsRequired": "No se ha proporcionado %s",
+          "loc.messages.LIB_PathHasNullByte": "La ruta de acceso no puede tener bytes nulos",
+          "loc.messages.LIB_PathIsNotADirectory": "La ruta de acceso no es un directorio: %s",
+          "loc.messages.LIB_PathNotFound": "No se encuentra %s: %s",
+          "loc.messages.LIB_PlatformNotSupported": "No se admite la plataforma: %s",
+          "loc.messages.LIB_ProcessError": 'Error al intentar ejecutar el proceso "%s". Esto puede indicar que no se pudo iniciar el proceso. Error: %s',
+          "loc.messages.LIB_ProcessExitCode": 'Error del proceso "%s" con el c\xF3digo de salida %s',
+          "loc.messages.LIB_ProcessStderr": 'Error del proceso "%s" porque se escribieron una o varias l\xEDneas en la secuencia STDERR',
+          "loc.messages.LIB_ResourceFileAlreadySet": "El archivo de recursos se ha establecido ya en: %s",
+          "loc.messages.LIB_ResourceFileNotExist": "El archivo de recursos no existe: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "No se ha establecido el archivo de recursos. No se encuentra la cadena localizada para la clave: %s",
+          "loc.messages.LIB_ReturnCode": "C\xF3digo de retorno: %d",
+          "loc.messages.LIB_StdioNotClosed": 'Las secuencias STDIO no se cerraron en un plazo de %s\xA0segundos desde el evento de salida del proceso "%s". Esto puede indicar que un proceso secundario ha heredado las secuencias STDIO y a\xFAn no se ha cerrado.',
+          "loc.messages.LIB_UndefinedNodeVersion": "La versi\xF3n del nodo no est\xE1 definida.",
+          "loc.messages.LIB_UnhandledEx": "No controlada: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "Hay varias coincidencias en el \xE1rea de trabajo. Se usar\xE1 la primera.",
+          "loc.messages.LIB_WhichNotFound_Linux": 'No se puede encontrar el archivo ejecutable: "%s". Compruebe que la ruta de acceso del archivo existe o que el archivo se puede encontrar en un directorio especificado en la variable de entorno PATH. Revise tambi\xE9n el modo de archivo para comprobar que el archivo es ejecutable.',
+          "loc.messages.LIB_WhichNotFound_Win": 'No se puede encontrar el archivo ejecutable: "%s". Compruebe que la ruta de acceso del archivo existe o que el archivo se puede encontrar en un directorio especificado en la variable de entorno PATH. Revise tambi\xE9n que el archivo tenga una extensi\xF3n v\xE1lida para un archivo ejecutable.'
+        },
+        "fr-FR": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp\xA0: nous ne pouvons pas copier un r\xE9pertoire \xAB\xA0%s\xA0\xBB sans l\u2019option r\xE9cursive",
+          "loc.messages.LIB_CopyFileFailed": "Erreur durant la copie du fichier. Tentatives restantes\xA0: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "La pile de r\xE9pertoires est vide",
+          "loc.messages.LIB_EndpointAuthNotExist": "Donn\xE9es d'authentification du point de terminaison absentes\xA0: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "Param\xE8tre de donn\xE9es du point de terminaison %s absent\xA0: %s",
+          "loc.messages.LIB_EndpointNotExist": "Point de terminaison absent\xA0: %s",
+          "loc.messages.LIB_FailOnCode": "Code de retour de l'\xE9chec\xA0: %d",
+          "loc.messages.LIB_InputRequired": "Entr\xE9e n\xE9cessaire\xA0: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "Authentification du point de terminaison non valide\xA0: %s",
+          "loc.messages.LIB_InvalidPattern": "Mod\xE8le non valide\xA0: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "Entr\xE9e de fichier s\xE9curis\xE9 non valide\xA0: %s",
+          "loc.messages.LIB_LocStringNotFound": "Cha\xEEne localis\xE9e introuvable pour la cl\xE9\xA0: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "La fusion des r\xE9sultats des tests de plusieurs fichiers en une seule s\xE9rie de tests n'est pas prise en charge dans cette version de l'agent de build pour OSX/Linux. Chaque fichier de r\xE9sultats des tests est publi\xE9 en tant que s\xE9rie de tests distincte dans VSO/TFS.",
+          "loc.messages.LIB_MkdirFailed": "Impossible de cr\xE9er le r\xE9pertoire '%s'. %s",
+          "loc.messages.LIB_MkdirFailedFileExists": "Impossible de cr\xE9er le r\xE9pertoire '%s'. Pr\xE9sence d'un fichier en conflit\xA0: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "Impossible de cr\xE9er le r\xE9pertoire '%s'. Le r\xE9pertoire racine n'existe pas\xA0: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "Impossible de cr\xE9er le r\xE9pertoire '%s'. Impossible de v\xE9rifier l'existence du r\xE9pertoire\xA0: '%s'. Si le r\xE9pertoire est un partage de fichiers, v\xE9rifiez que le nom du partage est correct, que le partage est en ligne, et que le processus actuel est autoris\xE9 \xE0 acc\xE9der au partage.",
+          "loc.messages.LIB_MultilineSecret": "Les secrets ne peuvent pas contenir plusieurs lignes",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "D\xE9sol\xE9, nous n\u2019avons pas pu trouver le r\xE9pertoire pr\xE9c\xE9dent",
+          "loc.messages.LIB_OperationFailed": "\xC9chec de %s\xA0: %s",
+          "loc.messages.LIB_ParameterIsRequired": "%s non fourni",
+          "loc.messages.LIB_PathHasNullByte": "Le chemin ne peut pas contenir d'octets de valeur Null",
+          "loc.messages.LIB_PathIsNotADirectory": "Le chemin d\u2019acc\xE8s n\u2019est pas un r\xE9pertoire : %s",
+          "loc.messages.LIB_PathNotFound": "%s\xA0: %s introuvable",
+          "loc.messages.LIB_PlatformNotSupported": "Plateforme non prise en charge\xA0: %s",
+          "loc.messages.LIB_ProcessError": "Erreur durant la tentative d'ex\xE9cution du processus '%s'. Cela peut indiquer que le processus n'a pas r\xE9ussi \xE0 d\xE9marrer. Erreur\xA0: %s",
+          "loc.messages.LIB_ProcessExitCode": "\xC9chec du processus '%s'. Code de sortie\xA0: %s",
+          "loc.messages.LIB_ProcessStderr": "\xC9chec du processus '%s', car une ou plusieurs lignes ont \xE9t\xE9 \xE9crites dans le flux STDERR",
+          "loc.messages.LIB_ResourceFileAlreadySet": "Le fichier de ressources est d\xE9j\xE0 d\xE9fini\xA0: %s",
+          "loc.messages.LIB_ResourceFileNotExist": "Le fichier de ressources n'existe pas\xA0: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "Le fichier de ressources n'est pas d\xE9fini. La cha\xEEne localis\xE9e de la cl\xE9 est introuvable\xA0: %s",
+          "loc.messages.LIB_ReturnCode": "Code de retour\xA0: %d",
+          "loc.messages.LIB_StdioNotClosed": "Les flux STDIO ne se sont pas ferm\xE9s dans les %s secondes qui ont suivi l'\xE9v\xE9nement exit du processus '%s'. Cela peut indiquer qu'un processus enfant a h\xE9rit\xE9 des flux STDIO et qu'il n'est pas encore sorti.",
+          "loc.messages.LIB_UndefinedNodeVersion": "La version du n\u0153ud n\u2019est pas d\xE9finie.",
+          "loc.messages.LIB_UnhandledEx": "Non g\xE9r\xE9\xA0: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "Plusieurs espaces de travail correspondants. Utilisation du premier d'entre eux.",
+          "loc.messages.LIB_WhichNotFound_Linux": "Impossible de localiser le fichier ex\xE9cutable\xA0: '%s'. V\xE9rifiez si le chemin du fichier existe ou si le fichier peut se trouver dans un r\xE9pertoire sp\xE9cifi\xE9 par la variable d'environnement PATH. V\xE9rifiez \xE9galement le Mode de Fichier pour d\xE9terminer si le fichier est ex\xE9cutable.",
+          "loc.messages.LIB_WhichNotFound_Win": "Impossible de localiser le fichier ex\xE9cutable\xA0: '%s'. V\xE9rifiez si le chemin du fichier existe ou si le fichier peut se trouver dans un r\xE9pertoire sp\xE9cifi\xE9 par la variable d'environnement PATH. V\xE9rifiez \xE9galement si le fichier a une extension de fichier ex\xE9cutable valide."
+        },
+        "it-IT": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: impossibile copiare una directory '%s' senza l'opzione ripetuta",
+          "loc.messages.LIB_CopyFileFailed": "Si \xE8 verificato un errore durante la copia del file. Tentativi rimasti: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "Lo stack della directory \xE8 vuoto",
+          "loc.messages.LIB_EndpointAuthNotExist": "I dati di autenticazione endpoint non sono presenti: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "Il parametro %s dei dati dell'endpoint non \xE8 presente: %s",
+          "loc.messages.LIB_EndpointNotExist": "Endpoint non presente: %s",
+          "loc.messages.LIB_FailOnCode": "Codice restituito dell'errore: %d",
+          "loc.messages.LIB_InputRequired": "Input richiesto: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "Autenticazione endpoint non valida: %s",
+          "loc.messages.LIB_InvalidPattern": "Criterio non valido: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "L'input del file protetto non \xE8 valido: %s",
+          "loc.messages.LIB_LocStringNotFound": "La stringa localizzata per la chiave %s non \xE8 stata trovata",
+          "loc.messages.LIB_MergeTestResultNotSupported": "L'unione di pi\xF9 file risultanti da un'unica esecuzione dei test non \xE8 supportata in questa versione dell'agente di compilazione per OS X/Linux. Ogni file dei risultati del test verr\xE0 pubblicato come esecuzione dei test separata in VSO/TFS.",
+          "loc.messages.LIB_MkdirFailed": "Non \xE8 possibile creare la directory '%s'. %s",
+          "loc.messages.LIB_MkdirFailedFileExists": "Non \xE8 possibile creare la directory '%s'. Esiste un file in conflitto: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "Non \xE8 possibile creare la directory '%s'. La directory radice non esiste: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "Non \xE8 possibile creare la directory '%s' perch\xE9 non \xE8 possibile verificarne l'esistenza: '%s'. Se la directory \xE8 una condivisione file, verificare che il nome della condivisione sia corretto, che la condivisione sia online e che il processo corrente sia autorizzato ad accedervi.",
+          "loc.messages.LIB_MultilineSecret": "I segreti non possono contenere pi\xF9 righe",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "Non \xE8 stato possibile trovare la directory precedente",
+          "loc.messages.LIB_OperationFailed": "Operazione %s non riuscita: %s",
+          "loc.messages.LIB_ParameterIsRequired": "Parametro %s non fornito",
+          "loc.messages.LIB_PathHasNullByte": "Il percorso non pu\xF2 contenere byte Null",
+          "loc.messages.LIB_PathIsNotADirectory": "Il percorso non \xE8 una directory: %s",
+          "loc.messages.LIB_PathNotFound": "Percorso %s non trovato: %s",
+          "loc.messages.LIB_PlatformNotSupported": "Piattaforma non supportata: %s",
+          "loc.messages.LIB_ProcessError": "Si \xE8 verificato un errore durante il tentativo di eseguire il processo '%s'. Questo errore pu\xF2 indicare che non \xE8 stato possibile avviare il processo. Errore: %s",
+          "loc.messages.LIB_ProcessExitCode": "Il processo '%s' non \xE8 riuscito. Codice di uscita: %s",
+          "loc.messages.LIB_ProcessStderr": "Il processo '%s' non \xE8 riuscito perch\xE9 una o pi\xF9 righe sono state scritte nel flusso STDERR",
+          "loc.messages.LIB_ResourceFileAlreadySet": "Il file di risorse \xE8 gi\xE0 stato impostato su %s",
+          "loc.messages.LIB_ResourceFileNotExist": "Il file di risorse non esiste: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "Il file di risorse non \xE8 stato impostato. La stringa localizzata per la chiave %s non \xE8 stata trovata",
+          "loc.messages.LIB_ReturnCode": "Codice restituito: %d",
+          "loc.messages.LIB_StdioNotClosed": "I flussi STDIO non si sono chiusi entro %s secondi dall'evento di uscita dal processo '%s'. Questa condizione pu\xF2 indicare che un processo figlio ha ereditato i flussi STDIO e non \xE8 ancora stato terminato.",
+          "loc.messages.LIB_UndefinedNodeVersion": "La versione del nodo non \xE8 definita.",
+          "loc.messages.LIB_UnhandledEx": "Eccezione non gestita: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "Sono presenti pi\xF9 corrispondenze dell'area di lavoro. Verr\xE0 usata la prima.",
+          "loc.messages.LIB_WhichNotFound_Linux": "Il file eseguibile '%s' non \xE8 stato trovato. Verificare se il percorso di file esiste o il file \xE8 presente in una directory specificata dalla variabile di ambiente PATH. Controllare anche la modalit\xE0 file per verificare che il file sia eseguibile.",
+          "loc.messages.LIB_WhichNotFound_Win": "Il file eseguibile '%s' non \xE8 stato trovato. Verificare se il percorso di file esiste o il file \xE8 presente in una directory specificata dalla variabile di ambiente PATH. Controllare anche che l'estensione sia valida per un file eseguibile."
+        },
+        "ja-JP": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: \u518D\u5E30\u30AA\u30D7\u30B7\u30E7\u30F3\u306A\u3057\u3067\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA '%s' \u3092\u30B3\u30D4\u30FC\u3059\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093",
+          "loc.messages.LIB_CopyFileFailed": "\u30D5\u30A1\u30A4\u30EB\u306E\u30B3\u30D4\u30FC\u4E2D\u306B\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002\u6B8B\u308A\u306E\u8A66\u884C\u56DE\u6570: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA \u30B9\u30BF\u30C3\u30AF\u304C\u7A7A\u3067\u3059",
+          "loc.messages.LIB_EndpointAuthNotExist": "\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u306E\u8A8D\u8A3C\u30C7\u30FC\u30BF\u304C\u3042\u308A\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u306E\u30C7\u30FC\u30BF \u30D1\u30E9\u30E1\u30FC\u30BF\u30FC %s \u304C\u3042\u308A\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_EndpointNotExist": "\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u304C\u5B58\u5728\u3057\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_FailOnCode": "\u5931\u6557\u306E\u30EA\u30BF\u30FC\u30F3 \u30B3\u30FC\u30C9: %d",
+          "loc.messages.LIB_InputRequired": "\u5165\u529B\u304C\u5FC5\u8981\u3067\u3059: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "\u30A8\u30F3\u30C9\u30DD\u30A4\u30F3\u30C8\u306E\u8A8D\u8A3C\u304C\u7121\u52B9\u3067\u3059: %s",
+          "loc.messages.LIB_InvalidPattern": "\u7121\u52B9\u306A\u30D1\u30BF\u30FC\u30F3: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "\u7121\u52B9\u306A\u30BB\u30AD\u30E5\u30A2 \u30D5\u30A1\u30A4\u30EB\u5165\u529B: %s",
+          "loc.messages.LIB_LocStringNotFound": "\u30AD\u30FC\u306E loc \u6587\u5B57\u5217\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "\u8907\u6570\u306E\u30D5\u30A1\u30A4\u30EB\u304B\u3089\u306E\u30C6\u30B9\u30C8\u7D50\u679C\u3092 1 \u3064\u306E\u30C6\u30B9\u30C8\u5B9F\u884C\u306B\u30DE\u30FC\u30B8\u3059\u308B\u51E6\u7406\u306F\u3001OSX/Linux \u7528\u306E\u30D3\u30EB\u30C9 \u30A8\u30FC\u30B8\u30A7\u30F3\u30C8\u306E\u3053\u306E\u30D0\u30FC\u30B8\u30E7\u30F3\u3067\u306F\u30B5\u30DD\u30FC\u30C8\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002\u5404\u30C6\u30B9\u30C8\u7D50\u679C\u30D5\u30A1\u30A4\u30EB\u304C VSO/TFS \u3067\u5225\u500B\u306E\u30C6\u30B9\u30C8\u5B9F\u884C\u3068\u3057\u3066\u767A\u884C\u3055\u308C\u307E\u3059\u3002",
+          "loc.messages.LIB_MkdirFailed": "\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA '%s' \u3092\u4F5C\u6210\u3067\u304D\u307E\u305B\u3093\u3002%s",
+          "loc.messages.LIB_MkdirFailedFileExists": "\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA '%s' \u3092\u4F5C\u6210\u3067\u304D\u307E\u305B\u3093\u3002\u7AF6\u5408\u3059\u308B\u30D5\u30A1\u30A4\u30EB\u304C\u5B58\u5728\u3057\u307E\u3059: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA '%s' \u3092\u4F5C\u6210\u3067\u304D\u307E\u305B\u3093\u3002\u30EB\u30FC\u30C8 \u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u304C\u5B58\u5728\u3057\u307E\u305B\u3093: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA '%s' \u3092\u4F5C\u6210\u3067\u304D\u307E\u305B\u3093\u3002\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u304C\u5B58\u5728\u3059\u308B\u3053\u3068\u3092\u78BA\u8A8D\u3067\u304D\u307E\u305B\u3093: '%s'\u3002\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u304C\u30D5\u30A1\u30A4\u30EB\u5171\u6709\u3067\u3042\u308B\u5834\u5408\u3001\u305D\u306E\u5171\u6709\u540D\u304C\u6B63\u3057\u3044\u3053\u3068\u3001\u305D\u306E\u5171\u6709\u304C\u30AA\u30F3\u30E9\u30A4\u30F3\u3067\u3042\u308B\u3053\u3068\u3001\u305D\u3057\u3066\u73FE\u5728\u306E\u30D7\u30ED\u30BB\u30B9\u306B\u305D\u306E\u5171\u6709\u3078\u306E\u30A2\u30AF\u30BB\u30B9\u8A31\u53EF\u304C\u3042\u308B\u3053\u3068\u3092\u3054\u78BA\u8A8D\u304F\u3060\u3055\u3044\u3002",
+          "loc.messages.LIB_MultilineSecret": "\u30B7\u30FC\u30AF\u30EC\u30C3\u30C8\u306B\u8907\u6570\u306E\u884C\u3092\u542B\u3081\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "\u524D\u306E\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F",
+          "loc.messages.LIB_OperationFailed": "\u5931\u6557\u3057\u307E\u3057\u305F %s: %s",
+          "loc.messages.LIB_ParameterIsRequired": "%s \u304C\u63D0\u4F9B\u3055\u308C\u3066\u3044\u307E\u305B\u3093",
+          "loc.messages.LIB_PathHasNullByte": "\u30D1\u30B9\u306B null \u30D0\u30A4\u30C8\u3092\u542B\u3081\u308B\u3053\u3068\u306F\u3067\u304D\u307E\u305B\u3093",
+          "loc.messages.LIB_PathIsNotADirectory": "\u30D1\u30B9\u304C\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u3067\u306F\u3042\u308A\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_PathNotFound": "\u898B\u3064\u304B\u308A\u307E\u305B\u3093\u3067\u3057\u305F %s: %s",
+          "loc.messages.LIB_PlatformNotSupported": "\u30D7\u30E9\u30C3\u30C8\u30D5\u30A9\u30FC\u30E0\u304C\u30B5\u30DD\u30FC\u30C8\u3055\u308C\u3066\u3044\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_ProcessError": "\u30D7\u30ED\u30BB\u30B9 '%s' \u3092\u5B9F\u884C\u3057\u3088\u3046\u3068\u3057\u3066\u3044\u308B\u3068\u304D\u306B\u30A8\u30E9\u30FC\u304C\u767A\u751F\u3057\u307E\u3057\u305F\u3002\u30D7\u30ED\u30BB\u30B9\u306E\u958B\u59CB\u306B\u5931\u6557\u3057\u305F\u304A\u305D\u308C\u304C\u3042\u308A\u307E\u3059\u3002\u30A8\u30E9\u30FC: %s",
+          "loc.messages.LIB_ProcessExitCode": "\u30D7\u30ED\u30BB\u30B9 '%s' \u304C\u7D42\u4E86\u30B3\u30FC\u30C9 %s \u3067\u5931\u6557\u3057\u307E\u3057\u305F",
+          "loc.messages.LIB_ProcessStderr": "1 \u3064\u4EE5\u4E0A\u306E\u884C\u304C STDERR \u30B9\u30C8\u30EA\u30FC\u30E0\u306B\u66F8\u304D\u8FBC\u307E\u308C\u305F\u305F\u3081\u3001\u30D7\u30ED\u30BB\u30B9 '%s' \u304C\u5931\u6557\u3057\u307E\u3057\u305F",
+          "loc.messages.LIB_ResourceFileAlreadySet": "\u30EA\u30BD\u30FC\u30B9 \u30D5\u30A1\u30A4\u30EB\u306F\u65E2\u306B %s \u306B\u8A2D\u5B9A\u3055\u308C\u3066\u3044\u307E\u3059",
+          "loc.messages.LIB_ResourceFileNotExist": "\u30EA\u30BD\u30FC\u30B9 \u30D5\u30A1\u30A4\u30EB\u304C\u5B58\u5728\u3057\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "\u30EA\u30BD\u30FC\u30B9 \u30D5\u30A1\u30A4\u30EB\u304C\u8A2D\u5B9A\u3055\u308C\u3066\u304A\u3089\u305A\u3001\u30AD\u30FC\u306E loc \u6587\u5B57\u5217\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093: %s",
+          "loc.messages.LIB_ReturnCode": "\u30EA\u30BF\u30FC\u30F3 \u30B3\u30FC\u30C9: %d",
+          "loc.messages.LIB_StdioNotClosed": "STDIO \u30B9\u30C8\u30EA\u30FC\u30E0\u304C\u3001\u30D7\u30ED\u30BB\u30B9 '%s' \u306E\u7D42\u4E86\u30A4\u30D9\u30F3\u30C8\u304B\u3089 %s \u79D2\u4EE5\u5185\u306B\u7D42\u4E86\u3057\u307E\u305B\u3093\u3067\u3057\u305F\u3002\u3053\u308C\u306F\u3001\u5B50\u30D7\u30ED\u30BB\u30B9\u304C STDIO \u30B9\u30C8\u30EA\u30FC\u30E0\u3092\u7D99\u627F\u3057\u3001\u307E\u3060\u7D42\u4E86\u3057\u3066\u3044\u306A\u3044\u3053\u3068\u3092\u793A\u3057\u3066\u3044\u308B\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059\u3002",
+          "loc.messages.LIB_UndefinedNodeVersion": "\u30CE\u30FC\u30C9\u306E\u30D0\u30FC\u30B8\u30E7\u30F3\u304C\u5B9A\u7FA9\u3055\u308C\u3066\u3044\u307E\u305B\u3093\u3002",
+          "loc.messages.LIB_UnhandledEx": "\u672A\u51E6\u7406: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "\u8907\u6570\u306E\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u304C\u4E00\u81F4\u3057\u307E\u3059\u3002\u6700\u521D\u306E\u30EF\u30FC\u30AF\u30B9\u30DA\u30FC\u30B9\u304C\u4F7F\u7528\u3055\u308C\u307E\u3059\u3002",
+          "loc.messages.LIB_WhichNotFound_Linux": "\u5B9F\u884C\u53EF\u80FD\u30D5\u30A1\u30A4\u30EB\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093: '%s'\u3002\u30D5\u30A1\u30A4\u30EB \u30D1\u30B9\u304C\u5B58\u5728\u3059\u308B\u3053\u3068\u3001\u307E\u305F\u306F\u305D\u306E\u30D5\u30A1\u30A4\u30EB\u304C PATH \u74B0\u5883\u5909\u6570\u3067\u6307\u5B9A\u3055\u308C\u305F\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u5185\u306B\u3042\u308B\u3053\u3068\u3092\u3054\u78BA\u8A8D\u304F\u3060\u3055\u3044\u3002\u30D5\u30A1\u30A4\u30EB\u304C\u5B9F\u884C\u53EF\u80FD\u304B\u3069\u3046\u304B\u306B\u3064\u3044\u3066\u30D5\u30A1\u30A4\u30EB \u30E2\u30FC\u30C9\u3082\u3054\u78BA\u8A8D\u304F\u3060\u3055\u3044\u3002",
+          "loc.messages.LIB_WhichNotFound_Win": "\u5B9F\u884C\u53EF\u80FD\u30D5\u30A1\u30A4\u30EB\u304C\u898B\u3064\u304B\u308A\u307E\u305B\u3093: '%s'\u3002\u30D5\u30A1\u30A4\u30EB \u30D1\u30B9\u304C\u5B58\u5728\u3059\u308B\u3053\u3068\u3001\u307E\u305F\u306F\u305D\u306E\u30D5\u30A1\u30A4\u30EB\u304C PATH \u74B0\u5883\u5909\u6570\u3067\u6307\u5B9A\u3055\u308C\u305F\u30C7\u30A3\u30EC\u30AF\u30C8\u30EA\u5185\u306B\u3042\u308B\u3053\u3068\u3092\u3054\u78BA\u8A8D\u304F\u3060\u3055\u3044\u3002\u305D\u306E\u30D5\u30A1\u30A4\u30EB\u306B\u5B9F\u884C\u53EF\u80FD\u30D5\u30A1\u30A4\u30EB\u306E\u6709\u52B9\u306A\u62E1\u5F35\u5B50\u304C\u3064\u3044\u3066\u3044\u308B\u3053\u3068\u3082\u3054\u78BA\u8A8D\u304F\u3060\u3055\u3044\u3002"
+        },
+        "ko-KR": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: \uC7AC\uADC0 \uC635\uC158 \uC5C6\uC774 \uB514\uB809\uD130\uB9AC '%s'\uB97C \uBCF5\uC0AC\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_CopyFileFailed": "\uD30C\uC77C\uC744 \uBCF5\uC0AC\uD558\uB294 \uB3D9\uC548 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4. \uB0A8\uC740 \uC2DC\uB3C4 \uD69F\uC218: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "\uB514\uB809\uD130\uB9AC \uC2A4\uD0DD\uC774 \uBE44\uC5B4 \uC788\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_EndpointAuthNotExist": "\uC5D4\uB4DC\uD3EC\uC778\uD2B8 \uC778\uC99D \uB370\uC774\uD130\uAC00 \uC5C6\uC74C: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "\uC5D4\uB4DC\uD3EC\uC778\uD2B8 \uB370\uC774\uD130 \uB9E4\uAC1C \uBCC0\uC218 %s\uC774(\uAC00) \uC5C6\uC74C: %s",
+          "loc.messages.LIB_EndpointNotExist": "\uC5D4\uB4DC\uD3EC\uC778\uD2B8\uAC00 \uC5C6\uC74C: %s",
+          "loc.messages.LIB_FailOnCode": "\uC2E4\uD328 \uBC18\uD658 \uCF54\uB4DC: %d",
+          "loc.messages.LIB_InputRequired": "\uC785\uB825 \uD544\uC694: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "\uC798\uBABB\uB41C \uC5D4\uB4DC\uD3EC\uC778\uD2B8 \uC778\uC99D: %s",
+          "loc.messages.LIB_InvalidPattern": "\uC798\uBABB\uB41C \uD328\uD134: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "\uBCF4\uC548 \uD30C\uC77C \uC785\uB825\uC774 \uC798\uBABB\uB428: %s",
+          "loc.messages.LIB_LocStringNotFound": "\uD0A4\uC5D0 \uB300\uD55C loc \uBB38\uC790\uC5F4\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC74C: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "\uC774 OSX/Linux\uC6A9 \uBE4C\uB4DC \uC5D0\uC774\uC804\uD2B8 \uBC84\uC804\uC5D0\uC11C \uC5EC\uB7EC \uD30C\uC77C\uC758 \uD14C\uC2A4\uD2B8 \uACB0\uACFC\uB97C \uD558\uB098\uC758 \uD14C\uC2A4\uD2B8 \uC2E4\uD589\uC73C\uB85C \uBCD1\uD569\uD558\uB294 \uAC83\uC744 \uC9C0\uC6D0\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4. \uAC01 \uD14C\uC2A4\uD2B8 \uACB0\uACFC \uD30C\uC77C\uC740 VSO/TFS\uC5D0\uC11C \uBCC4\uB3C4\uC758 \uD14C\uC2A4\uD2B8 \uC2E4\uD589\uC73C\uB85C \uAC8C\uC2DC\uB429\uB2C8\uB2E4.",
+          "loc.messages.LIB_MkdirFailed": "'%s' \uB514\uB809\uD130\uB9AC\uB97C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. %s",
+          "loc.messages.LIB_MkdirFailedFileExists": "'%s' \uB514\uB809\uD130\uB9AC\uB97C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uCDA9\uB3CC\uD558\uB294 \uD30C\uC77C '%s'\uC774(\uAC00) \uC788\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "'%s' \uB514\uB809\uD130\uB9AC\uB97C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uB8E8\uD2B8 \uB514\uB809\uD130\uB9AC '%s'\uC774(\uAC00) \uC5C6\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "'%s' \uB514\uB809\uD130\uB9AC\uB97C \uB9CC\uB4E4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. '%s' \uB514\uB809\uD130\uB9AC\uAC00 \uC788\uB294\uC9C0 \uD655\uC778\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uB514\uB809\uD130\uB9AC\uAC00 \uD30C\uC77C \uACF5\uC720\uC778 \uACBD\uC6B0 \uACF5\uC720 \uC774\uB984\uC774 \uC62C\uBC14\uB974\uACE0, \uACF5\uC720\uAC00 \uC628\uB77C\uC778 \uC0C1\uD0DC\uC774\uBA70, \uD604\uC7AC \uD504\uB85C\uC138\uC2A4\uC5D0 \uACF5\uC720\uC5D0 \uC561\uC138\uC2A4\uD560 \uC218 \uC788\uB294 \uAD8C\uD55C\uC774 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.",
+          "loc.messages.LIB_MultilineSecret": "\uBE44\uBC00\uC5D0 \uC5EC\uB7EC \uC904\uC744 \uC0AC\uC6A9\uD560 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "\uC774\uC804 \uB514\uB809\uD130\uB9AC\uB97C \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_OperationFailed": "%s \uC2E4\uD328: %s",
+          "loc.messages.LIB_ParameterIsRequired": "%s\uC774(\uAC00) \uC81C\uACF5\uB418\uC9C0 \uC54A\uC74C",
+          "loc.messages.LIB_PathHasNullByte": "\uACBD\uB85C\uC5D0 null \uBC14\uC774\uD2B8\uB97C \uD3EC\uD568\uD560 \uC218 \uC5C6\uC74C",
+          "loc.messages.LIB_PathIsNotADirectory": "\uACBD\uB85C\uAC00 \uB514\uB809\uD130\uB9AC\uAC00 \uC544\uB2D9\uB2C8\uB2E4. %s",
+          "loc.messages.LIB_PathNotFound": "%s\uC744(\uB97C) \uCC3E\uC744 \uC218 \uC5C6\uC74C: %s",
+          "loc.messages.LIB_PlatformNotSupported": "\uC9C0\uC6D0\uB418\uC9C0 \uC54A\uB294 \uD50C\uB7AB\uD3FC: %s",
+          "loc.messages.LIB_ProcessError": "'%s' \uD504\uB85C\uC138\uC2A4\uB97C \uC2E4\uD589\uD560 \uB54C \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC2B5\uB2C8\uB2E4. \uC774\uB294 \uD504\uB85C\uC138\uC2A4\uB97C \uC2DC\uC791\uD558\uC9C0 \uBABB\uD588\uC74C\uC744 \uB098\uD0C0\uB0BC \uC218 \uC788\uC2B5\uB2C8\uB2E4. \uC624\uB958: %s",
+          "loc.messages.LIB_ProcessExitCode": "'%s' \uD504\uB85C\uC138\uC2A4\uAC00 \uC2E4\uD328\uD568(\uC885\uB8CC \uCF54\uB4DC %s)",
+          "loc.messages.LIB_ProcessStderr": "\uD558\uB098 \uC774\uC0C1\uC758 \uC904\uC774 STDERR \uC2A4\uD2B8\uB9BC\uC5D0 \uC4F0\uC600\uC73C\uBBC0\uB85C '%s' \uD504\uB85C\uC138\uC2A4\uAC00 \uC2E4\uD328\uD568",
+          "loc.messages.LIB_ResourceFileAlreadySet": "\uB9AC\uC18C\uC2A4 \uD30C\uC77C\uC774 \uC774\uBBF8 \uB2E4\uC74C\uC73C\uB85C \uC124\uC815\uB428: %s",
+          "loc.messages.LIB_ResourceFileNotExist": "\uB9AC\uC18C\uC2A4 \uD30C\uC77C\uC774 \uC5C6\uC74C: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "\uB9AC\uC18C\uC2A4 \uD30C\uC77C\uC774 \uC124\uC815\uB418\uC9C0 \uC54A\uC558\uACE0 \uD0A4\uC5D0 \uB300\uD55C loc \uBB38\uC790\uC5F4\uC744 \uCC3E\uC744 \uC218 \uC5C6\uC74C: %s",
+          "loc.messages.LIB_ReturnCode": "\uBC18\uD658 \uCF54\uB4DC: %d",
+          "loc.messages.LIB_StdioNotClosed": "STDIO \uC2A4\uD2B8\uB9BC\uC774 %s\uCD08 \uC774\uB0B4('%s' \uD504\uB85C\uC138\uC2A4\uC758 \uC885\uB8CC \uC774\uBCA4\uD2B8 \uD6C4)\uC5D0 \uB2EB\uD788\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4. \uC774\uB294 \uC790\uC2DD \uD504\uB85C\uC138\uC2A4\uAC00 STDIO \uC2A4\uD2B8\uB9BC\uC744 \uC0C1\uC18D\uD588\uC73C\uBA70 \uC544\uC9C1 \uC885\uB8CC\uB418\uC9C0 \uC54A\uC558\uC74C\uC744 \uB098\uD0C0\uB0BC \uC218 \uC788\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_UndefinedNodeVersion": "\uB178\uB4DC \uBC84\uC804\uC774 \uC815\uC758\uB418\uC9C0 \uC54A\uC558\uC2B5\uB2C8\uB2E4.",
+          "loc.messages.LIB_UnhandledEx": "\uCC98\uB9AC\uB418\uC9C0 \uC54A\uC74C: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "\uC5EC\uB7EC \uC791\uC5C5 \uC601\uC5ED\uC774 \uC77C\uCE58\uD569\uB2C8\uB2E4. \uCCAB \uBC88\uC9F8 \uC791\uC5C5 \uC601\uC5ED\uC744 \uC0AC\uC6A9\uD558\uC138\uC694.",
+          "loc.messages.LIB_WhichNotFound_Linux": "\uC2E4\uD589 \uD30C\uC77C '%s'\uC744(\uB97C) \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uD30C\uC77C \uACBD\uB85C\uAC00 \uC788\uB294\uC9C0 \uB610\uB294 PATH \uD658\uACBD \uBCC0\uC218\uC5D0\uC11C \uC9C0\uC815\uD55C \uB514\uB809\uD130\uB9AC \uB0B4\uC5D0\uC11C \uD30C\uC77C\uC744 \uCC3E\uC744 \uC218 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694. \uB610\uD55C \uD30C\uC77C \uBAA8\uB4DC\uB97C \uD655\uC778\uD558\uC5EC \uD30C\uC77C\uC744 \uC2E4\uD589\uD560 \uC218 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694.",
+          "loc.messages.LIB_WhichNotFound_Win": "\uC2E4\uD589 \uD30C\uC77C '%s'\uC744(\uB97C) \uCC3E\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4. \uD30C\uC77C \uACBD\uB85C\uAC00 \uC788\uB294\uC9C0 \uB610\uB294 PATH \uD658\uACBD \uBCC0\uC218\uC5D0\uC11C \uC9C0\uC815\uD55C \uB514\uB809\uD130\uB9AC \uB0B4\uC5D0\uC11C \uD30C\uC77C\uC744 \uCC3E\uC744 \uC218 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694. \uB610\uD55C \uD30C\uC77C\uC774 \uC2E4\uD589 \uD30C\uC77C\uC5D0 \uB300\uD574 \uC62C\uBC14\uB978 \uD655\uC7A5\uBA85\uC744 \uAC00\uC9C0\uACE0 \uC788\uB294\uC9C0 \uD655\uC778\uD558\uC138\uC694."
+        },
+        "ru-RU": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp: \u043D\u0435\u0432\u043E\u0437\u043C\u043E\u0436\u043D\u043E \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433 '%s' \u0431\u0435\u0437 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440\u0430 \u0440\u0435\u043A\u0443\u0440\u0441\u0438\u0438",
+          "loc.messages.LIB_CopyFileFailed": "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u0438\u0438 \u0444\u0430\u0439\u043B\u0430. \u041E\u0441\u0442\u0430\u0432\u0448\u0435\u0435\u0441\u044F \u0447\u0438\u0441\u043B\u043E \u043F\u043E\u043F\u044B\u0442\u043E\u043A: %s.",
+          "loc.messages.LIB_DirectoryStackEmpty": "\u0421\u0442\u0435\u043A \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0430 \u043F\u0443\u0441\u0442",
+          "loc.messages.LIB_EndpointAuthNotExist": "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u044E\u0442 \u0434\u0430\u043D\u043D\u044B\u0435 \u0434\u043B\u044F \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0438 \u043F\u043E\u0434\u043B\u0438\u043D\u043D\u043E\u0441\u0442\u0438 \u043A\u043E\u043D\u0435\u0447\u043D\u043E\u0439 \u0442\u043E\u0447\u043A\u0438: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "\u041E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442 \u043F\u0430\u0440\u0430\u043C\u0435\u0442\u0440 %s \u0434\u0430\u043D\u043D\u044B\u0445 \u043A\u043E\u043D\u0435\u0447\u043D\u043E\u0439 \u0442\u043E\u0447\u043A\u0438: %s",
+          "loc.messages.LIB_EndpointNotExist": "\u041A\u043E\u043D\u0435\u0447\u043D\u0430\u044F \u0442\u043E\u0447\u043A\u0430 \u043E\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442: %s.",
+          "loc.messages.LIB_FailOnCode": "\u041A\u043E\u0434 \u0432\u043E\u0437\u0432\u0440\u0430\u0442\u0430 \u043F\u0440\u0438 \u0441\u0431\u043E\u0435: %d.",
+          "loc.messages.LIB_InputRequired": "\u0422\u0440\u0435\u0431\u0443\u0435\u0442\u0441\u044F \u0432\u0432\u0435\u0441\u0442\u0438 \u0434\u0430\u043D\u043D\u044B\u0435: %s.",
+          "loc.messages.LIB_InvalidEndpointAuth": "\u041D\u0435\u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u0430\u044F \u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u043F\u043E\u0434\u043B\u0438\u043D\u043D\u043E\u0441\u0442\u0438 \u043A\u043E\u043D\u0435\u0447\u043D\u043E\u0439 \u0442\u043E\u0447\u043A\u0438: %s.",
+          "loc.messages.LIB_InvalidPattern": '\u041D\u0435\u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u044B\u0439 \u0448\u0430\u0431\u043B\u043E\u043D: "%s"',
+          "loc.messages.LIB_InvalidSecureFilesInput": "\u041D\u0435\u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u044B\u0435 \u0432\u0445\u043E\u0434\u043D\u044B\u0435 \u0434\u0430\u043D\u043D\u044B\u0435 \u0437\u0430\u0449\u0438\u0442\u043D\u043E\u0433\u043E \u0444\u0430\u0439\u043B\u0430: %s",
+          "loc.messages.LIB_LocStringNotFound": "\u041D\u0435 \u0443\u0434\u0430\u0435\u0442\u0441\u044F \u043D\u0430\u0439\u0442\u0438 \u043B\u043E\u043A\u0430\u043B\u0438\u0437\u043E\u0432\u0430\u043D\u043D\u0443\u044E \u0441\u0442\u0440\u043E\u043A\u0443 \u0434\u043B\u044F \u043A\u043B\u044E\u0447\u0430: %s.",
+          "loc.messages.LIB_MergeTestResultNotSupported": "\u041E\u0431\u044A\u0435\u0434\u0438\u043D\u0435\u043D\u0438\u0435 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u0442\u0435\u0441\u0442\u043E\u0432 \u0438\u0437 \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u0438\u0445 \u0444\u0430\u0439\u043B\u043E\u0432 \u0432 \u043E\u0434\u0438\u043D \u0442\u0435\u0441\u0442\u043E\u0432\u044B\u0439 \u0437\u0430\u043F\u0443\u0441\u043A \u043D\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F \u0432 \u044D\u0442\u043E\u0439 \u0432\u0435\u0440\u0441\u0438\u0438 \u0430\u0433\u0435\u043D\u0442\u0430 \u0441\u0431\u043E\u0440\u043A\u0438 \u0434\u043B\u044F OSX/Linux. \u041A\u0430\u0436\u0434\u044B\u0439 \u0444\u0430\u0439\u043B \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u0442\u0435\u0441\u0442\u0430 \u0431\u0443\u0434\u0435\u0442 \u043E\u043F\u0443\u0431\u043B\u0438\u043A\u043E\u0432\u0430\u043D \u0432 \u043A\u0430\u0447\u0435\u0441\u0442\u0432\u0435 \u043E\u0442\u0434\u0435\u043B\u044C\u043D\u043E\u0433\u043E \u0442\u0435\u0441\u0442\u043E\u0432\u043E\u0433\u043E \u0437\u0430\u043F\u0443\u0441\u043A\u0430 \u0432 VSO/TFS.",
+          "loc.messages.LIB_MkdirFailed": '\u041D\u0435 \u0443\u0434\u0430\u0435\u0442\u0441\u044F \u0441\u043E\u0437\u0434\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433 "%s". %s',
+          "loc.messages.LIB_MkdirFailedFileExists": '\u041D\u0435 \u0443\u0434\u0430\u0435\u0442\u0441\u044F \u0441\u043E\u0437\u0434\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433 "%s". \u0421\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442 \u043A\u043E\u043D\u0444\u043B\u0438\u043A\u0442\u0443\u044E\u0449\u0438\u0439 \u0444\u0430\u0439\u043B: "%s"',
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0437\u0434\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433 "%s". \u041A\u043E\u0440\u043D\u0435\u0432\u043E\u0439 \u043A\u0430\u0442\u0430\u043B\u043E\u0433 \u043D\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442: "%s"',
+          "loc.messages.LIB_MkdirFailedInvalidShare": '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0437\u0434\u0430\u0442\u044C \u043A\u0430\u0442\u0430\u043B\u043E\u0433 "%s". \u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043F\u0440\u043E\u0432\u0435\u0440\u0438\u0442\u044C, \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442 \u043B\u0438 \u043A\u0430\u0442\u0430\u043B\u043E\u0433 "%s". \u0415\u0441\u043B\u0438 \u043A\u0430\u0442\u0430\u043B\u043E\u0433 \u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u0444\u0430\u0439\u043B\u043E\u0432\u044B\u043C \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u043C, \u0443\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044C, \u0447\u0442\u043E \u0438\u043C\u044F \u0440\u0435\u0441\u0443\u0440\u0441\u0430 \u0443\u043A\u0430\u0437\u0430\u043D\u043E \u043F\u0440\u0430\u0432\u0438\u043B\u044C\u043D\u043E, \u043E\u043D \u0440\u0430\u0431\u043E\u0442\u0430\u0435\u0442 \u0438 \u0442\u0435\u043A\u0443\u0449\u0438\u0439 \u043F\u0440\u043E\u0446\u0435\u0441\u0441 \u0438\u043C\u0435\u0435\u0442 \u0440\u0430\u0437\u0440\u0435\u0448\u0435\u043D\u0438\u0435 \u043D\u0430 \u0434\u043E\u0441\u0442\u0443\u043F \u043A \u043D\u0435\u043C\u0443.',
+          "loc.messages.LIB_MultilineSecret": "\u0421\u0435\u043A\u0440\u0435\u0442 \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0431\u044B\u0442\u044C \u043C\u043D\u043E\u0433\u043E\u0441\u0442\u0440\u043E\u0447\u043D\u044B\u043C",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043D\u0430\u0439\u0442\u0438 \u043F\u0440\u0435\u0434\u044B\u0434\u0443\u0449\u0438\u0439 \u043A\u0430\u0442\u0430\u043B\u043E\u0433",
+          "loc.messages.LIB_OperationFailed": "\u0421\u0431\u043E\u0439 %s: %s.",
+          "loc.messages.LIB_ParameterIsRequired": "\u041D\u0435 \u0443\u043A\u0430\u0437\u0430\u043D %s.",
+          "loc.messages.LIB_PathHasNullByte": "\u041F\u0443\u0442\u044C \u043D\u0435 \u043C\u043E\u0436\u0435\u0442 \u0441\u043E\u0434\u0435\u0440\u0436\u0430\u0442\u044C \u043F\u0443\u0441\u0442\u044B\u0435 \u0431\u0430\u0439\u0442\u044B.",
+          "loc.messages.LIB_PathIsNotADirectory": "\u041F\u0443\u0442\u044C \u043D\u0435 \u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u043E\u043C: %s",
+          "loc.messages.LIB_PathNotFound": "\u041D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D %s: %s.",
+          "loc.messages.LIB_PlatformNotSupported": "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430 \u043D\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u0442\u0441\u044F: %s",
+          "loc.messages.LIB_ProcessError": '\u041F\u0440\u043E\u0438\u0437\u043E\u0448\u043B\u0430 \u043E\u0448\u0438\u0431\u043A\u0430 \u043F\u0440\u0438 \u043F\u043E\u043F\u044B\u0442\u043A\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u0438\u0442\u044C \u043F\u0440\u043E\u0446\u0435\u0441\u0441 "%s". \u042D\u0442\u043E \u043C\u043E\u0436\u0435\u0442 \u043E\u0437\u043D\u0430\u0447\u0430\u0442\u044C, \u0447\u0442\u043E \u043F\u0440\u043E\u0446\u0435\u0441\u0441 \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u043F\u0443\u0441\u0442\u0438\u0442\u044C. \u041E\u0448\u0438\u0431\u043A\u0430: %s',
+          "loc.messages.LIB_ProcessExitCode": '\u041F\u0440\u043E\u0438\u0437\u043E\u0448\u0435\u043B \u0441\u0431\u043E\u0439 \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0430 "%s" \u0441 \u043A\u043E\u0434\u043E\u043C \u0432\u044B\u0445\u043E\u0434\u0430 %s.',
+          "loc.messages.LIB_ProcessStderr": '\u041F\u0440\u043E\u0438\u0437\u043E\u0448\u0435\u043B \u0441\u0431\u043E\u0439 \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0430 "%s", \u0442\u0430\u043A \u043A\u0430\u043A \u043E\u0434\u043D\u0430 \u0438\u043B\u0438 \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0441\u0442\u0440\u043E\u043A \u0431\u044B\u043B\u0438 \u0437\u0430\u043F\u0438\u0441\u0430\u043D\u044B \u0432 \u043F\u043E\u0442\u043E\u043A STDERR.',
+          "loc.messages.LIB_ResourceFileAlreadySet": "\u0424\u0430\u0439\u043B \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 \u0443\u0436\u0435 \u0437\u0430\u0434\u0430\u043D: %s.",
+          "loc.messages.LIB_ResourceFileNotExist": "\u0424\u0430\u0439\u043B \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 \u043D\u0435 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442: %s.",
+          "loc.messages.LIB_ResourceFileNotSet": "\u0424\u0430\u0439\u043B \u0440\u0435\u0441\u0443\u0440\u0441\u043E\u0432 \u043D\u0435 \u0437\u0430\u0434\u0430\u043D, \u043D\u0435 \u0443\u0434\u0430\u0435\u0442\u0441\u044F \u043D\u0430\u0439\u0442\u0438 \u043B\u043E\u043A\u0430\u043B\u0438\u0437\u043E\u0432\u0430\u043D\u043D\u0443\u044E \u0441\u0442\u0440\u043E\u043A\u0443 \u0434\u043B\u044F \u043A\u043B\u044E\u0447\u0430: %s.",
+          "loc.messages.LIB_ReturnCode": "\u041A\u043E\u0434 \u0432\u043E\u0437\u0432\u0440\u0430\u0442\u0430: %d",
+          "loc.messages.LIB_StdioNotClosed": '\u041F\u043E\u0442\u043E\u043A\u0438 STDIO \u043D\u0435 \u0431\u044B\u043B\u0438 \u0437\u0430\u043A\u0440\u044B\u0442\u044B \u0432 \u0442\u0435\u0447\u0435\u043D\u0438\u0435 %s\xA0\u0441 \u043F\u043E\u0441\u043B\u0435 \u043F\u043E\u043B\u0443\u0447\u0435\u043D\u0438\u044F \u0441\u043E\u0431\u044B\u0442\u0438\u044F \u0432\u044B\u0445\u043E\u0434\u0430 \u043E\u0442 \u043F\u0440\u043E\u0446\u0435\u0441\u0441\u0430 "%s". \u042D\u0442\u043E \u043C\u043E\u0436\u0435\u0442 \u0441\u0432\u0438\u0434\u0435\u0442\u0435\u043B\u044C\u0441\u0442\u0432\u043E\u0432\u0430\u0442\u044C \u043E \u0442\u043E\u043C, \u0447\u0442\u043E \u0434\u043E\u0447\u0435\u0440\u043D\u0438\u0439 \u043F\u0440\u043E\u0446\u0435\u0441\u0441 \u0443\u043D\u0430\u0441\u043B\u0435\u0434\u043E\u0432\u0430\u043B \u043F\u043E\u0442\u043E\u043A\u0438 STDIO \u0438 \u0435\u0449\u0435 \u043D\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0438\u043B \u0440\u0430\u0431\u043E\u0442\u0443.',
+          "loc.messages.LIB_UndefinedNodeVersion": "\u0412\u0435\u0440\u0441\u0438\u044F \u0443\u0437\u043B\u0430 \u043D\u0435 \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0435\u043D\u0430.",
+          "loc.messages.LIB_UnhandledEx": "\u041D\u0435 \u043E\u0431\u0440\u0430\u0431\u043E\u0442\u0430\u043D\u043E: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "\u041D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0440\u0430\u0431\u043E\u0447\u0438\u0445 \u043E\u0431\u043B\u0430\u0441\u0442\u0435\u0439 \u0441\u043E\u0432\u043F\u0430\u0434\u0430\u0435\u0442, \u0438\u0441\u043F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u043D\u0430 \u043F\u0435\u0440\u0432\u0430\u044F \u0440\u0430\u0431\u043E\u0447\u0430\u044F \u043E\u0431\u043B\u0430\u0441\u0442\u044C.",
+          "loc.messages.LIB_WhichNotFound_Linux": '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043D\u0430\u0439\u0442\u0438 \u0438\u0441\u043F\u043E\u043B\u043D\u044F\u0435\u043C\u044B\u0439 \u0444\u0430\u0439\u043B: "%s". \u0423\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044C, \u0447\u0442\u043E \u043F\u0443\u0442\u044C \u043A \u0444\u0430\u0439\u043B\u0443 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442 \u0438 \u0444\u0430\u0439\u043B \u043C\u043E\u0436\u043D\u043E \u043D\u0430\u0439\u0442\u0438 \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435, \u0443\u043A\u0430\u0437\u0430\u043D\u043D\u043E\u043C \u043F\u0435\u0440\u0435\u043C\u0435\u043D\u043D\u043E\u0439 \u043E\u043A\u0440\u0443\u0436\u0435\u043D\u0438\u044F PATH. \u0422\u0430\u043A\u0436\u0435 \u043F\u0440\u043E\u0432\u0435\u0440\u044C\u0442\u0435 \u0440\u0435\u0436\u0438\u043C \u0444\u0430\u0439\u043B\u0430, \u0447\u0442\u043E\u0431\u044B \u0443\u0431\u0435\u0434\u0438\u0442\u044C\u0441\u044F, \u0447\u0442\u043E \u0444\u0430\u0439\u043B \u044F\u0432\u043B\u044F\u0435\u0442\u0441\u044F \u0438\u0441\u043F\u043E\u043B\u043D\u044F\u0435\u043C\u044B\u043C.',
+          "loc.messages.LIB_WhichNotFound_Win": '\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043D\u0430\u0439\u0442\u0438 \u0438\u0441\u043F\u043E\u043B\u043D\u044F\u0435\u043C\u044B\u0439 \u0444\u0430\u0439\u043B: "%s". \u0423\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044C, \u0447\u0442\u043E \u043F\u0443\u0442\u044C \u043A \u0444\u0430\u0439\u043B\u0443 \u0441\u0443\u0449\u0435\u0441\u0442\u0432\u0443\u0435\u0442 \u0438 \u0447\u0442\u043E \u0444\u0430\u0439\u043B \u043C\u043E\u0436\u043D\u043E \u043D\u0430\u0439\u0442\u0438 \u0432 \u043A\u0430\u0442\u0430\u043B\u043E\u0433\u0435, \u0443\u043A\u0430\u0437\u0430\u043D\u043D\u043E\u043C \u043F\u0435\u0440\u0435\u043C\u0435\u043D\u043D\u043E\u0439 \u043E\u043A\u0440\u0443\u0436\u0435\u043D\u0438\u044F PATH. \u0422\u0430\u043A\u0436\u0435 \u0443\u0431\u0435\u0434\u0438\u0442\u0435\u0441\u044C, \u0447\u0442\u043E \u0443 \u0444\u0430\u0439\u043B\u0430 \u0435\u0441\u0442\u044C \u0434\u043E\u043F\u0443\u0441\u0442\u0438\u043C\u043E\u0435 \u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043D\u0438\u0435 \u0434\u043B\u044F \u0438\u0441\u043F\u043E\u043B\u043D\u044F\u0435\u043C\u043E\u0433\u043E \u0444\u0430\u0439\u043B\u0430.'
+        },
+        "zh-CN": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": 'cp: \u6CA1\u6709\u9012\u5F52\u9009\u9879\uFF0C\u65E0\u6CD5\u590D\u5236\u76EE\u5F55 "%s"',
+          "loc.messages.LIB_CopyFileFailed": "\u590D\u5236\u6587\u4EF6\u65F6\u51FA\u9519\u3002\u5269\u4F59\u5C1D\u8BD5\u6B21\u6570: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "\u76EE\u5F55\u5806\u6808\u4E3A\u7A7A",
+          "loc.messages.LIB_EndpointAuthNotExist": "\u7EC8\u7ED3\u70B9\u6388\u6743\u6570\u636E\u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "\u7EC8\u7ED3\u70B9\u6570\u636E\u53C2\u6570 %s \u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_EndpointNotExist": "\u7EC8\u7ED3\u70B9\u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_FailOnCode": "\u6545\u969C\u8FD4\u56DE\u4EE3\u7801: %d",
+          "loc.messages.LIB_InputRequired": "\u8F93\u5165\u5FC5\u9700\u9879: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "\u7EC8\u7ED3\u70B9\u9A8C\u8BC1\u65E0\u6548: %s",
+          "loc.messages.LIB_InvalidPattern": '\u65E0\u6548\u7684\u6A21\u5F0F: "%s"',
+          "loc.messages.LIB_InvalidSecureFilesInput": "\u65E0\u6548\u7684\u5B89\u5168\u6587\u4EF6\u8F93\u5165: %s",
+          "loc.messages.LIB_LocStringNotFound": "\u65E0\u6CD5\u627E\u5230\u5173\u952E\u5B57\u7684\u672C\u5730\u5B57\u7B26\u4E32: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "\u6B64\u7248\u672C\u7684 OSX/Linux \u751F\u6210\u4EE3\u7406\u4E0D\u652F\u6301\u6765\u81EA\u67D0\u4E2A\u6D4B\u8BD5\u8FD0\u884C\u7684\u591A\u6587\u4EF6\u5408\u5E76\u6D4B\u8BD5\u7ED3\u679C\uFF0C\u5728 VSO/TFS \u4E2D\uFF0C\u6BCF\u4E2A\u6D4B\u8BD5\u7ED3\u679C\u6587\u4EF6\u90FD\u5C06\u4F5C\u4E3A\u5355\u72EC\u7684\u6D4B\u8BD5\u8FD0\u884C\u8FDB\u884C\u53D1\u5E03\u3002",
+          "loc.messages.LIB_MkdirFailed": "\u65E0\u6CD5\u521B\u5EFA\u76EE\u5F55\u201C%s\u201D\u3002%s",
+          "loc.messages.LIB_MkdirFailedFileExists": "\u65E0\u6CD5\u521B\u5EFA\u76EE\u5F55\u201C%s\u201D\u3002\u5B58\u5728\u51B2\u7A81\u6587\u4EF6:\u201C%s\u201D",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "\u65E0\u6CD5\u521B\u5EFA\u76EE\u5F55\u201C%s\u201D\u3002\u6839\u76EE\u5F55\u4E0D\u5B58\u5728:\u201C%s\u201D",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "\u65E0\u6CD5\u521B\u5EFA\u76EE\u5F55\u201C%s\u201D\u3002\u65E0\u6CD5\u9A8C\u8BC1\u201C%s\u201D\u76EE\u5F55\u662F\u5426\u5B58\u5728\u3002\u5982\u679C\u76EE\u5F55\u662F\u6587\u4EF6\u5171\u4EAB\uFF0C\u8BF7\u9A8C\u8BC1\u5171\u4EAB\u540D\u79F0\u662F\u5426\u6B63\u786E\u3001\u5171\u4EAB\u662F\u5426\u5DF2\u8054\u673A\u4EE5\u53CA\u5F53\u524D\u8FDB\u7A0B\u662F\u5426\u6709\u6743\u8BBF\u95EE\u8BE5\u5171\u4EAB\u3002",
+          "loc.messages.LIB_MultilineSecret": "\u5BC6\u7801\u4E0D\u80FD\u5305\u542B\u591A\u4E2A\u884C",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "\u627E\u4E0D\u5230\u4EE5\u524D\u7684\u76EE\u5F55",
+          "loc.messages.LIB_OperationFailed": "%s \u5931\u8D25: %s",
+          "loc.messages.LIB_ParameterIsRequired": "\u672A\u63D0\u4F9B %s",
+          "loc.messages.LIB_PathHasNullByte": "\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B null \u5B57\u8282",
+          "loc.messages.LIB_PathIsNotADirectory": "\u8DEF\u5F84\u4E0D\u662F\u76EE\u5F55\uFF1A %s",
+          "loc.messages.LIB_PathNotFound": "\u627E\u4E0D\u5230 %s: %s",
+          "loc.messages.LIB_PlatformNotSupported": "\u5E73\u53F0\u4E0D\u53D7\u652F\u6301: %s",
+          "loc.messages.LIB_ProcessError": "\u5C1D\u8BD5\u6267\u884C\u8FDB\u7A0B\u201C%s\u201D\u65F6\u51FA\u9519\u3002\u8FD9\u53EF\u80FD\u8868\u793A\u8FDB\u7A0B\u542F\u52A8\u5931\u8D25\u3002\u9519\u8BEF: %s",
+          "loc.messages.LIB_ProcessExitCode": "\u8FDB\u7A0B\u201C%s\u201D\u5931\u8D25\uFF0C\u9000\u51FA\u4EE3\u7801\u4E3A %s",
+          "loc.messages.LIB_ProcessStderr": "\u8FDB\u7A0B\u201C%s\u201D\u5931\u8D25\uFF0C\u56E0\u4E3A\u5DF2\u5C06\u4E00\u884C\u6216\u591A\u884C\u5199\u5165 STDERR \u6D41",
+          "loc.messages.LIB_ResourceFileAlreadySet": "\u8D44\u6E90\u6587\u4EF6\u5DF2\u88AB\u8BBE\u7F6E\u4E3A %s",
+          "loc.messages.LIB_ResourceFileNotExist": "\u8D44\u6E90\u6587\u4EF6\u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "\u8D44\u6E90\u6587\u4EF6\u5C1A\u672A\u8BBE\u7F6E\uFF0C\u65E0\u6CD5\u627E\u5230\u5173\u952E\u5B57\u7684\u672C\u5730\u5B57\u7B26\u4E32: %s",
+          "loc.messages.LIB_ReturnCode": "\u8FD4\u56DE\u4EE3\u7801: %d",
+          "loc.messages.LIB_StdioNotClosed": "STDIO \u6D41\u5728\u8FDB\u7A0B\u201C%s\u201D\u4E2D\u53D1\u751F\u9000\u51FA\u4E8B\u4EF6 %s \u79D2\u5185\u672A\u5173\u95ED \u3002\u8FD9\u53EF\u80FD\u8868\u793A\u5B50\u8FDB\u7A0B\u7EE7\u627F\u4E86 STDIO \u6D41\u4E14\u5C1A\u672A\u9000\u51FA\u3002",
+          "loc.messages.LIB_UndefinedNodeVersion": "\u8282\u70B9\u7248\u672C\u672A\u5B9A\u4E49\u3002",
+          "loc.messages.LIB_UnhandledEx": "\u672A\u5904\u7406: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "\u51FA\u73B0\u591A\u4E2A\u5DE5\u4F5C\u533A\u5339\u914D\u65F6\uFF0C\u4F7F\u7528\u7B2C\u4E00\u4E2A\u3002",
+          "loc.messages.LIB_WhichNotFound_Linux": '\u65E0\u6CD5\u5B9A\u4F4D\u53EF\u6267\u884C\u6587\u4EF6: "%s"\u3002\u8BF7\u9A8C\u8BC1\u6587\u4EF6\u8DEF\u5F84\u662F\u5426\u5B58\u5728\u6216\u6587\u4EF6\u662F\u5426\u53EF\u5728 PATH \u73AF\u5883\u53D8\u91CF\u6307\u5B9A\u7684\u76EE\u5F55\u5185\u627E\u5230\u3002\u53E6\u8BF7\u68C0\u67E5\u6587\u4EF6\u6A21\u5F0F\u4EE5\u9A8C\u8BC1\u6587\u4EF6\u662F\u5426\u53EF\u6267\u884C\u3002',
+          "loc.messages.LIB_WhichNotFound_Win": '\u65E0\u6CD5\u5B9A\u4F4D\u53EF\u6267\u884C\u6587\u4EF6: "%s"\u3002\u8BF7\u9A8C\u8BC1\u6587\u4EF6\u8DEF\u5F84\u662F\u5426\u5B58\u5728\u6216\u6587\u4EF6\u662F\u5426\u53EF\u5728 PATH \u73AF\u5883\u53D8\u91CF\u6307\u5B9A\u7684\u76EE\u5F55\u5185\u627E\u5230\u3002\u53E6\u8BF7\u9A8C\u8BC1\u8BE5\u6587\u4EF6\u662F\u5426\u5177\u6709\u53EF\u6267\u884C\u6587\u4EF6\u7684\u6709\u6548\u6269\u5C55\u540D\u3002'
+        },
+        "zh-TW": {
+          "loc.messages.LIB_CopyDirectoryWithoutRecursiveOption": "cp\uFF1A\u672A\u6307\u5B9A\u905E\u8FF4\u9078\u9805\uFF0C\u7121\u6CD5\u8907\u88FD\u76EE\u9304 '%s'",
+          "loc.messages.LIB_CopyFileFailed": "\u8907\u88FD\u6A94\u6848\u6642\u767C\u751F\u932F\u8AA4\u3002\u5269\u9918\u5617\u8A66\u6B21\u6578: %s",
+          "loc.messages.LIB_DirectoryStackEmpty": "\u76EE\u9304\u5806\u758A\u662F\u7A7A\u7684",
+          "loc.messages.LIB_EndpointAuthNotExist": "\u7AEF\u9EDE\u9A57\u8B49\u8CC7\u6599\u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_EndpointDataNotExist": "\u7AEF\u9EDE\u8CC7\u6599\u53C3\u6578 %s \u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_EndpointNotExist": "\u7AEF\u9EDE\u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_FailOnCode": "\u50B3\u56DE\u7A0B\u5F0F\u78BC\u5931\u6557: %d",
+          "loc.messages.LIB_InputRequired": "\u9700\u8981\u8F38\u5165\u5167\u5BB9: %s",
+          "loc.messages.LIB_InvalidEndpointAuth": "\u7AEF\u9EDE\u9A57\u8B49\u7121\u6548: %s",
+          "loc.messages.LIB_InvalidPattern": "\u6A21\u5F0F\u7121\u6548: '%s'",
+          "loc.messages.LIB_InvalidSecureFilesInput": "\u5B89\u5168\u6A94\u6848\u8F38\u5165\u7121\u6548: %s",
+          "loc.messages.LIB_LocStringNotFound": "\u627E\u4E0D\u5230\u7D22\u5F15\u9375\u7684 loc \u5B57\u4E32: %s",
+          "loc.messages.LIB_MergeTestResultNotSupported": "OSX/Linux \u7684\u6B64\u7248\u672C\u7D44\u5EFA\u4EE3\u7406\u7A0B\u5F0F\u4E0D\u652F\u63F4\u5C07\u591A\u500B\u6A94\u6848\u7684\u6E2C\u8A66\u7D50\u679C\u5408\u4F75\u81F3\u55AE\u4E00\u6E2C\u8A66\u56DE\u5408\uFF0C\u6BCF\u500B\u6E2C\u8A66\u7D50\u679C\u6A94\u6848\u5C07\u4F5C\u70BA\u500B\u5225\u6E2C\u8A66\u56DE\u5408\u5728 VSO/TFS \u4E2D\u767C\u884C\u3002",
+          "loc.messages.LIB_MkdirFailed": "\u7121\u6CD5\u5EFA\u7ACB\u76EE\u9304 '%s'\u3002%s",
+          "loc.messages.LIB_MkdirFailedFileExists": "\u7121\u6CD5\u5EFA\u7ACB\u76EE\u9304 '%s'\u3002\u5B58\u5728\u885D\u7A81\u7684\u6A94\u6848: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidDriveRoot": "\u7121\u6CD5\u5EFA\u7ACB\u76EE\u9304 '%s'\u3002\u6839\u76EE\u9304\u4E0D\u5B58\u5728: '%s'",
+          "loc.messages.LIB_MkdirFailedInvalidShare": "\u7121\u6CD5\u5EFA\u7ACB\u76EE\u9304 '%s'\u3002\u7121\u6CD5\u9A57\u8B49\u76EE\u9304\u662F\u5426\u5B58\u5728: '%s'\u3002\u5982\u679C\u76EE\u9304\u662F\u6A94\u6848\u5171\u7528\uFF0C\u8ACB\u9A57\u8B49\u5171\u7528\u540D\u7A31\u6B63\u78BA\u3001\u5171\u7528\u5728\u7DDA\u4E0A\uFF0C\u800C\u4E14\u76EE\u524D\u7684\u6D41\u7A0B\u5177\u6709\u5B58\u53D6\u5171\u7528\u7684\u6B0A\u9650\u3002",
+          "loc.messages.LIB_MultilineSecret": "\u7955\u5BC6\u4E0D\u5F97\u5305\u542B\u591A\u500B\u884C",
+          "loc.messages.LIB_NotFoundPreviousDirectory": "\u627E\u4E0D\u5230\u4E4B\u524D\u7684\u76EE\u9304",
+          "loc.messages.LIB_OperationFailed": "%s \u5931\u6557: %s",
+          "loc.messages.LIB_ParameterIsRequired": "\u672A\u63D0\u4F9B %s",
+          "loc.messages.LIB_PathHasNullByte": "\u8DEF\u5F91\u4E0D\u80FD\u5305\u542B null \u4F4D\u5143\u7D44",
+          "loc.messages.LIB_PathIsNotADirectory": "\u8DEF\u5F91\u4E0D\u662F\u76EE\u9304\uFF1A %s",
+          "loc.messages.LIB_PathNotFound": "\u627E\u4E0D\u5230 %s: %s",
+          "loc.messages.LIB_PlatformNotSupported": "\u4E0D\u652F\u63F4\u7684\u5E73\u53F0: %s",
+          "loc.messages.LIB_ProcessError": "\u5617\u8A66\u57F7\u884C\u8655\u7406\u5E8F '%s' \u6642\u767C\u751F\u932F\u8AA4\u3002\u9019\u53EF\u80FD\u8868\u793A\u8655\u7406\u5E8F\u7121\u6CD5\u555F\u52D5\u3002\u932F\u8AA4: %s",
+          "loc.messages.LIB_ProcessExitCode": "\u8655\u7406\u5E8F '%s' \u5931\u6557\uFF0C\u7D50\u675F\u4EE3\u78BC\u70BA %s",
+          "loc.messages.LIB_ProcessStderr": "\u56E0\u70BA STDERR \u8CC7\u6599\u6D41\u4E2D\u5BEB\u5165\u4E86\u4E00\u6216\u591A\u884C\u7A0B\u5F0F\u78BC\uFF0C\u6240\u4EE5\u8655\u7406\u5E8F '%s' \u5931\u6557",
+          "loc.messages.LIB_ResourceFileAlreadySet": "\u8CC7\u6E90\u6A94\u6848\u5DF2\u8A2D\u5B9A\u81F3: %s",
+          "loc.messages.LIB_ResourceFileNotExist": "\u8CC7\u6E90\u6A94\u6848\u4E0D\u5B58\u5728: %s",
+          "loc.messages.LIB_ResourceFileNotSet": "\u5C1A\u672A\u8A2D\u5B9A\u8CC7\u6E90\u6A94\u6848\uFF0C\u627E\u4E0D\u5230\u7D22\u5F15\u9375\u7684 loc \u5B57\u4E32: %s",
+          "loc.messages.LIB_ReturnCode": "\u50B3\u56DE\u7A0B\u5F0F\u78BC: %d",
+          "loc.messages.LIB_StdioNotClosed": "STDIO \u8CC7\u6599\u6D41\u672A\u5728 %s \u79D2\u5167\u95DC\u9589 (\u5F9E\u8655\u7406\u5E8F '%s' \u7D50\u675F\u4E8B\u4EF6\u767C\u751F\u5F8C\u7B97\u8D77)\u3002\u9019\u53EF\u80FD\u8868\u793A\u5B50\u8655\u7406\u5E8F\u7E7C\u627F\u4E86 STDIO \u8CC7\u6599\u6D41\u4E14\u5C1A\u672A\u7D50\u675F\u3002",
+          "loc.messages.LIB_UndefinedNodeVersion": "\u672A\u5B9A\u7FA9\u7BC0\u9EDE\u7248\u672C\u3002",
+          "loc.messages.LIB_UnhandledEx": "\u672A\u7D93\u8655\u7406: %s",
+          "loc.messages.LIB_UseFirstGlobMatch": "\u591A\u500B\u5DE5\u4F5C\u5340\u76F8\u7B26\u3002\u8ACB\u5148\u4F7F\u7528\u3002",
+          "loc.messages.LIB_WhichNotFound_Linux": "\u627E\u4E0D\u5230\u53EF\u57F7\u884C\u6A94: '%s'\u3002\u8ACB\u78BA\u8A8D\u6A94\u6848\u8DEF\u5F91\u5B58\u5728\uFF0C\u6216\u6A94\u6848\u53EF\u4EE5\u5728 PATH \u74B0\u5883\u8B8A\u6578\u6307\u5B9A\u7684\u76EE\u9304\u4E2D\u627E\u5230\u3002\u53E6\u8ACB\u6AA2\u67E5\u6A94\u6848\u6A21\u5F0F\uFF0C\u78BA\u8A8D\u6A94\u6848\u53EF\u4EE5\u57F7\u884C\u3002",
+          "loc.messages.LIB_WhichNotFound_Win": "\u627E\u4E0D\u5230\u53EF\u57F7\u884C\u6A94: '%s'\u3002\u8ACB\u78BA\u8A8D\u6A94\u6848\u8DEF\u5F91\u5B58\u5728\uFF0C\u6216\u6A94\u6848\u53EF\u4EE5\u5728 PATH \u74B0\u5883\u8B8A\u6578\u6307\u5B9A\u7684\u76EE\u9304\u4E2D\u627E\u5230\u3002\u53E6\u8ACB\u78BA\u8A8D\u6A94\u6848\u5177\u5099\u6709\u6548\u7684\u53EF\u57F7\u884C\u6A94\u526F\u6A94\u540D\u3002"
+        }
+      }
+    };
+  }
+});
+
 // node_modules/azure-pipelines-task-lib/internal.js
 var require_internal = __commonJS({
   "node_modules/azure-pipelines-task-lib/internal.js"(exports2) {
@@ -2177,6 +2726,7 @@ var require_internal = __commonJS({
     var vm = require_vault();
     var semver = require_semver();
     var crypto2 = require("crypto");
+    var libResource = require_lib_resource();
     exports2._knownVariableMap = {};
     var _commandCorrelationId;
     var IssueSource;
@@ -2229,6 +2779,19 @@ var require_internal = __commonJS({
     var _resourceFiles = {};
     var _libResourceFileLoaded = false;
     var _resourceCulture = "en-US";
+    function _getLocStrings(resourceJson, locResourceJson) {
+      var locStrings = {};
+      if (resourceJson && resourceJson.hasOwnProperty("messages")) {
+        for (var key in resourceJson.messages) {
+          if (locResourceJson && locResourceJson.hasOwnProperty("loc.messages." + key)) {
+            locStrings[key] = locResourceJson["loc.messages." + key];
+          } else {
+            locStrings[key] = resourceJson.messages[key];
+          }
+        }
+      }
+      return locStrings;
+    }
     function _loadResJson(resjsonFile) {
       var resJson;
       if (_exist(resjsonFile)) {
@@ -2268,18 +2831,24 @@ var require_internal = __commonJS({
               break;
             }
           }
-          for (var key in resourceJson.messages) {
-            if (locResourceJson && locResourceJson.hasOwnProperty("loc.messages." + key)) {
-              locStrings[key] = locResourceJson["loc.messages." + key];
-            } else {
-              locStrings[key] = resourceJson.messages[key];
-            }
-          }
+          locStrings = _getLocStrings(resourceJson, locResourceJson);
         }
       } else {
         _warning("LIB_ResourceFile does not exist", IssueSource.TaskInternal);
       }
       return locStrings;
+    }
+    function _loadEmbeddedLocStrings(resourceData, culture) {
+      var localizedResource;
+      var upperCulture = culture.toUpperCase();
+      var localizedResources = resourceData.localizedMessages || {};
+      for (var localizedCulture in localizedResources) {
+        if (localizedCulture.toUpperCase() == upperCulture) {
+          localizedResource = localizedResources[localizedCulture];
+          break;
+        }
+      }
+      return _getLocStrings(resourceData, localizedResource);
     }
     function _setResourcePath(path3, ignoreWarnings) {
       if (ignoreWarnings === void 0) {
@@ -2314,8 +2883,7 @@ var require_internal = __commonJS({
         param[_i - 1] = arguments[_i];
       }
       if (!_libResourceFileLoaded) {
-        var libResourceFile = path2.join(__dirname, "lib.json");
-        var libLocStrs = _loadLocStrings(libResourceFile, _resourceCulture);
+        var libLocStrs = _loadEmbeddedLocStrings(libResource, _resourceCulture);
         for (var libKey in libLocStrs) {
           _locStringCache[libKey] = libLocStrs[libKey];
         }
@@ -4063,6 +4631,328 @@ var require_q = __commonJS({
   }
 });
 
+// node_modules/azure-pipelines-task-lib/externaloutput.js
+var require_externaloutput = __commonJS({
+  "node_modules/azure-pipelines-task-lib/externaloutput.js"(exports2) {
+    "use strict";
+    var __extends = exports2 && exports2.__extends || /* @__PURE__ */ (function() {
+      var extendStatics = function(d, b) {
+        extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
+          d2.__proto__ = b2;
+        } || function(d2, b2) {
+          for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
+        };
+        return extendStatics(d, b);
+      };
+      return function(d, b) {
+        if (typeof b !== "function" && b !== null)
+          throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
+        extendStatics(d, b);
+        function __() {
+          this.constructor = d;
+        }
+        d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
+      };
+    })();
+    var __assign = exports2 && exports2.__assign || function() {
+      __assign = Object.assign || function(t) {
+        for (var s, i = 1, n = arguments.length; i < n; i++) {
+          s = arguments[i];
+          for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
+            t[p] = s[p];
+        }
+        return t;
+      };
+      return __assign.apply(this, arguments);
+    };
+    Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.errorExternalOutput = exports2.warningExternalOutput = exports2.debugExternalOutput = exports2.writeExternalOutput = exports2.createFilteredWriter = exports2.filterExternalOutput = exports2.createExternalOutputStream = exports2.ExternalOutputStream = exports2.MarkerFilter = exports2.defaultAllowedVsoCommands = void 0;
+    var stream = require("stream");
+    var im = require_internal();
+    var MARKER = Buffer.from("##vso[", "ascii");
+    var NEUTRALIZED = Buffer.from("##_vso[", "ascii");
+    var EMPTY = Buffer.alloc(0);
+    var SPACE = 32;
+    var RBRACKET = 93;
+    var CR = 13;
+    var LF = 10;
+    var MAX_HEADER = 256;
+    exports2.defaultAllowedVsoCommands = Object.freeze(["task.debug", "task.setprogress"]);
+    function resolveVsoCommandMode(mode) {
+      switch (mode || "blockOnly") {
+        case "disabled":
+          return { block: false, telemetry: false };
+        case "telemetryOnly":
+          return { block: false, telemetry: true };
+        case "blockAndTelemetry":
+          return { block: true, telemetry: true };
+        case "blockOnly":
+          return { block: true, telemetry: false };
+        default:
+          return { block: true, telemetry: false };
+      }
+    }
+    function publishVsoCommandTelemetry(event) {
+      try {
+        var telemetryEvent = __assign(__assign({}, event), { SYSTEM_TASKINSTANCEID: im._getVariable("SYSTEM_TASKINSTANCEID") || "", SYSTEM_TASKINSTANCENAME: im._getVariable("SYSTEM_TASKINSTANCENAME") || "", SYSTEM_JOBID: im._getVariable("SYSTEM_JOBID") || "", SYSTEM_PLANID: im._getVariable("SYSTEM_PLANID") || "" });
+        im._command("telemetry.publish", { area: "TaskLib", feature: "ExternalOutputVsoCommand" }, JSON.stringify(telemetryEvent));
+      } catch (_err) {
+        console.error(_err);
+      }
+    }
+    function createMarkerFilter(options) {
+      var mode = resolveVsoCommandMode(options.vsoCommandMode);
+      var telemetry = mode.telemetry ? function(event) {
+        return publishVsoCommandTelemetry(event);
+      } : void 0;
+      return new MarkerFilter(!!options.enableVsoCommands, resolveAllowed(options), mode.block, options.source, telemetry);
+    }
+    function resolveAllowed(options) {
+      if (!options.enableVsoCommands) {
+        return /* @__PURE__ */ new Set();
+      }
+      var list = options.allowedVsoCommands !== void 0 ? options.allowedVsoCommands : exports2.defaultAllowedVsoCommands;
+      return new Set(list.map(function(c) {
+        return c.toLowerCase();
+      }));
+    }
+    function canonicalCommandName(raw) {
+      var parts = raw.split(".").filter(function(p) {
+        return p.length > 0;
+      });
+      if (parts.length !== 2) {
+        return null;
+      }
+      return (parts[0] + "." + parts[1]).toLowerCase();
+    }
+    function partialMarkerSuffixLength(buf) {
+      var max = Math.min(MARKER.length - 1, buf.length);
+      for (var k = max; k >= 1; k--) {
+        if (buf.compare(MARKER, 0, k, buf.length - k, buf.length) === 0) {
+          return k;
+        }
+      }
+      return 0;
+    }
+    function scanHeader(buf, start) {
+      var limit = Math.min(buf.length, start + MAX_HEADER);
+      for (var k = start; k < limit; k++) {
+        var b = buf[k];
+        if (b === SPACE || b === RBRACKET) {
+          return { term: k, newline: false };
+        }
+        if (b === CR || b === LF) {
+          return { term: k, newline: true };
+        }
+      }
+      return { term: -1, newline: false };
+    }
+    var MarkerFilter = (
+      /** @class */
+      (function() {
+        function MarkerFilter2(enabled, allowed, block, source, telemetry) {
+          if (block === void 0) {
+            block = true;
+          }
+          this.enabled = enabled;
+          this.allowed = allowed;
+          this.block = block;
+          this.source = source;
+          this.telemetry = telemetry;
+          this.pending = EMPTY;
+        }
+        MarkerFilter2.prototype.push = function(chunk) {
+          var buf = this.pending.length ? Buffer.concat([this.pending, chunk]) : chunk;
+          this.pending = EMPTY;
+          var out = [];
+          var pos = 0;
+          while (pos < buf.length) {
+            var idx = buf.indexOf(MARKER, pos);
+            if (idx === -1) {
+              var keep = Math.min(partialMarkerSuffixLength(buf), buf.length - pos);
+              var emitEnd = buf.length - keep;
+              if (emitEnd > pos) {
+                out.push(pos === 0 && emitEnd === buf.length ? buf : buf.subarray(pos, emitEnd));
+              }
+              this.pending = keep ? buf.subarray(buf.length - keep) : EMPTY;
+              break;
+            }
+            if (idx > pos) {
+              out.push(buf.subarray(pos, idx));
+            }
+            var afterMarker = idx + MARKER.length;
+            if (this.block && !this.enabled && !this.telemetry) {
+              out.push(NEUTRALIZED);
+              pos = afterMarker;
+              continue;
+            }
+            if (!this.block && !this.telemetry) {
+              out.push(MARKER);
+              pos = afterMarker;
+              continue;
+            }
+            var _a = scanHeader(buf, afterMarker), term = _a.term, newline = _a.newline;
+            if (term === -1) {
+              if (buf.length - afterMarker >= MAX_HEADER) {
+                out.push(this.block ? NEUTRALIZED : MARKER);
+                pos = afterMarker;
+                continue;
+              }
+              this.pending = buf.subarray(idx);
+              break;
+            }
+            if (newline) {
+              out.push(this.block ? NEUTRALIZED : MARKER);
+              pos = afterMarker;
+              continue;
+            }
+            var name_1 = canonicalCommandName(buf.toString("utf8", afterMarker, term));
+            var blocked = this.block && !(this.enabled && name_1 && this.allowed.has(name_1));
+            if (this.telemetry && name_1 && this.source) {
+              this.telemetry({ source: this.source, commandName: name_1, blocked });
+            }
+            out.push(blocked ? NEUTRALIZED : MARKER);
+            pos = afterMarker;
+          }
+          if (out.length === 0) {
+            return EMPTY;
+          }
+          if (out.length === 1) {
+            var only = out[0];
+            return only === NEUTRALIZED || only === MARKER ? Buffer.from(only) : only;
+          }
+          return Buffer.concat(out);
+        };
+        MarkerFilter2.prototype.flush = function() {
+          var p = this.pending;
+          this.pending = EMPTY;
+          if (p.length === 0) {
+            return EMPTY;
+          }
+          if (this.block && p.length >= MARKER.length && p.subarray(0, MARKER.length).equals(MARKER)) {
+            return Buffer.concat([NEUTRALIZED, p.subarray(MARKER.length)]);
+          }
+          return p;
+        };
+        return MarkerFilter2;
+      })()
+    );
+    exports2.MarkerFilter = MarkerFilter;
+    var ExternalOutputStream = (
+      /** @class */
+      (function(_super) {
+        __extends(ExternalOutputStream2, _super);
+        function ExternalOutputStream2(options) {
+          var _this = _super.call(this) || this;
+          _this.markerFilter = createMarkerFilter(options);
+          return _this;
+        }
+        ExternalOutputStream2.prototype._transform = function(chunk, _encoding, callback) {
+          try {
+            var buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+            var out = this.markerFilter.push(buf);
+            if (out.length) {
+              this.push(out);
+            }
+            callback();
+          } catch (err) {
+            callback(err);
+          }
+        };
+        ExternalOutputStream2.prototype._flush = function(callback) {
+          try {
+            var out = this.markerFilter.flush();
+            if (out.length) {
+              this.push(out);
+            }
+            callback();
+          } catch (err) {
+            callback(err);
+          }
+        };
+        return ExternalOutputStream2;
+      })(stream.Transform)
+    );
+    exports2.ExternalOutputStream = ExternalOutputStream;
+    function createExternalOutputStream(options) {
+      var filterStream = new ExternalOutputStream(options);
+      var destination = options.destination || process.stdout;
+      filterStream.pipe(destination, { end: false });
+      return filterStream;
+    }
+    exports2.createExternalOutputStream = createExternalOutputStream;
+    function filterExternalOutput(data, options) {
+      var filter = createMarkerFilter(options);
+      var buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+      var filtered = filter.push(buf);
+      var pending = filter.flush();
+      return pending.length ? Buffer.concat([filtered, pending]) : filtered;
+    }
+    exports2.filterExternalOutput = filterExternalOutput;
+    function createFilteredWriter(options, destination) {
+      var filter = createMarkerFilter(options);
+      var ended = false;
+      return {
+        write: function(data) {
+          if (ended) {
+            throw new Error("Cannot write after end");
+          }
+          var buf = Buffer.isBuffer(data) ? data : Buffer.from(String(data), "utf8");
+          var filtered = filter.push(buf);
+          if (filtered.length) {
+            destination.write(filtered);
+          }
+        },
+        end: function() {
+          if (ended) {
+            return;
+          }
+          ended = true;
+          var pending = filter.flush();
+          if (pending.length) {
+            destination.write(pending);
+          }
+        }
+      };
+    }
+    exports2.createFilteredWriter = createFilteredWriter;
+    function logExternalOutput(message, options) {
+      var filtered = filterExternalOutput(message, options);
+      switch (options.type) {
+        case "raw":
+          var destination = options.destination || process.stdout;
+          destination.write(filtered);
+          break;
+        case "debug":
+          im._debug(filtered.toString("utf8"));
+          break;
+        case "warning":
+          im._warning(filtered.toString("utf8"), options.issueSource, options.auditAction);
+          break;
+        case "error":
+          im._error(filtered.toString("utf8"), options.issueSource, options.auditAction);
+          break;
+      }
+    }
+    function writeExternalOutput(message, options) {
+      logExternalOutput(message, __assign(__assign({}, options), { type: "raw" }));
+    }
+    exports2.writeExternalOutput = writeExternalOutput;
+    function debugExternalOutput(message, options) {
+      logExternalOutput(message, __assign(__assign({}, options), { type: "debug" }));
+    }
+    exports2.debugExternalOutput = debugExternalOutput;
+    function warningExternalOutput(message, options) {
+      logExternalOutput(message, __assign(__assign({}, options), { type: "warning" }));
+    }
+    exports2.warningExternalOutput = warningExternalOutput;
+    function errorExternalOutput(message, options) {
+      logExternalOutput(message, __assign(__assign({}, options), { type: "error" }));
+    }
+    exports2.errorExternalOutput = errorExternalOutput;
+  }
+});
+
 // node_modules/azure-pipelines-task-lib/toolrunner.js
 var require_toolrunner = __commonJS({
   "node_modules/azure-pipelines-task-lib/toolrunner.js"(exports2) {
@@ -4094,6 +4984,7 @@ var require_toolrunner = __commonJS({
     var child = require("child_process");
     var im = require_internal();
     var fs3 = require("fs");
+    var eom = require_externaloutput();
     var ToolRunner = (
       /** @class */
       (function(_super) {
@@ -4396,11 +5287,39 @@ var require_toolrunner = __commonJS({
             failOnStdErr: options.failOnStdErr || false,
             ignoreReturnCode: options.ignoreReturnCode || false,
             windowsVerbatimArguments: options.windowsVerbatimArguments || false,
-            shell: options.shell || false
+            shell: options.shell || false,
+            externalOutput: options.externalOutput
           };
           result.outStream = options.outStream || process.stdout;
           result.errStream = options.errStream || process.stderr;
           return result;
+        };
+        ToolRunner2.prototype._createDisplayFilter = function(options) {
+          var ext = options.externalOutput;
+          if (!ext) {
+            return null;
+          }
+          var outStream = options.outStream;
+          var errDest = options.failOnStdErr ? options.errStream : options.outStream;
+          var stdoutWriter = eom.createFilteredWriter(ext, outStream);
+          var stderrWriter = errDest === outStream ? stdoutWriter : eom.createFilteredWriter(ext, errDest);
+          return {
+            commandLine: function(text) {
+              outStream.write(eom.filterExternalOutput(text, ext));
+            },
+            stdout: function(data) {
+              return stdoutWriter.write(data);
+            },
+            stderr: function(data) {
+              return stderrWriter.write(data);
+            },
+            finalize: function() {
+              stdoutWriter.end();
+              if (stderrWriter !== stdoutWriter) {
+                stderrWriter.end();
+              }
+            }
+          };
         };
         ToolRunner2.prototype._getSpawnOptions = function(options) {
           options = options || {};
@@ -4429,8 +5348,13 @@ var require_toolrunner = __commonJS({
           });
           var success = true;
           var optionsNonNull = this._cloneExecOptions(options);
+          var df = this._createDisplayFilter(optionsNonNull);
           if (!optionsNonNull.silent) {
-            optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            if (df) {
+              df.commandLine(this._getCommandString(optionsNonNull) + os2.EOL);
+            } else {
+              optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            }
           }
           var cp;
           var toolPath = pipeOutputToTool.toolPath;
@@ -4449,30 +5373,31 @@ var require_toolrunner = __commonJS({
           fileStream = this.pipeOutputToFile ? fs3.createWriteStream(this.pipeOutputToFile) : null;
           return new Promise(function(resolve, reject) {
             var _a, _b, _c, _d;
+            var complete = function() {
+              if (waitingEvents != 0) {
+                return;
+              }
+              if (df) {
+                df.finalize();
+              }
+              if (error) {
+                reject(error);
+              } else {
+                resolve(returnCode);
+              }
+            };
             if (fileStream) {
               waitingEvents++;
               fileStream.on("finish", function() {
                 waitingEvents--;
                 fileStream = null;
-                if (waitingEvents == 0) {
-                  if (error) {
-                    reject(error);
-                  } else {
-                    resolve(returnCode);
-                  }
-                }
+                complete();
               });
               fileStream.on("error", function(err) {
                 waitingEvents--;
                 _this._debug("Failed to pipe output of ".concat(toolPathFirst, " to file ").concat(_this.pipeOutputToFile, ". Error = ").concat(err));
                 fileStream = null;
-                if (waitingEvents == 0) {
-                  if (error) {
-                    reject(error);
-                  } else {
-                    resolve(returnCode);
-                  }
-                }
+                complete();
               });
             }
             (_a = cpFirst.stdout) === null || _a === void 0 ? void 0 : _a.on("data", function(data) {
@@ -4495,8 +5420,12 @@ var require_toolrunner = __commonJS({
               }
               successFirst = !optionsNonNull.failOnStdErr;
               if (!optionsNonNull.silent) {
-                var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
-                s.write(data);
+                if (df) {
+                  df.stderr(data);
+                } else {
+                  var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
+                  s.write(data);
+                }
               }
             });
             cpFirst.on("error", function(err) {
@@ -4507,9 +5436,7 @@ var require_toolrunner = __commonJS({
               }
               (_a2 = cp.stdin) === null || _a2 === void 0 ? void 0 : _a2.end();
               error = new Error(toolPathFirst + " failed. " + err.message);
-              if (waitingEvents == 0) {
-                reject(error);
-              }
+              complete();
             });
             cpFirst.on("close", function(code, signal) {
               var _a2;
@@ -4524,19 +5451,17 @@ var require_toolrunner = __commonJS({
                 fileStream.end();
               }
               (_a2 = cp.stdin) === null || _a2 === void 0 ? void 0 : _a2.end();
-              if (waitingEvents == 0) {
-                if (error) {
-                  reject(error);
-                } else {
-                  resolve(returnCode);
-                }
-              }
+              complete();
             });
             var stdLineBuffer = "";
             (_c = cp.stdout) === null || _c === void 0 ? void 0 : _c.on("data", function(data) {
               _this.emit("stdout", data);
               if (!optionsNonNull.silent) {
-                optionsNonNull.outStream.write(data);
+                if (df) {
+                  df.stdout(data);
+                } else {
+                  optionsNonNull.outStream.write(data);
+                }
               }
               stdLineBuffer = _this._processLineBuffer(data, stdLineBuffer, function(line) {
                 _this.emit("stdline", line);
@@ -4547,8 +5472,12 @@ var require_toolrunner = __commonJS({
               _this.emit("stderr", data);
               success = !optionsNonNull.failOnStdErr;
               if (!optionsNonNull.silent) {
-                var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
-                s.write(data);
+                if (df) {
+                  df.stderr(data);
+                } else {
+                  var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
+                  s.write(data);
+                }
               }
               errLineBuffer = _this._processLineBuffer(data, errLineBuffer, function(line) {
                 _this.emit("errline", line);
@@ -4557,9 +5486,7 @@ var require_toolrunner = __commonJS({
             cp.on("error", function(err) {
               waitingEvents--;
               error = new Error(toolPath + " failed. " + err.message);
-              if (waitingEvents == 0) {
-                reject(error);
-              }
+              complete();
             });
             cp.on("close", function(code, signal) {
               waitingEvents--;
@@ -4580,13 +5507,7 @@ var require_toolrunner = __commonJS({
               } else if (!success) {
                 error = new Error(toolPath + " failed with return code: " + code);
               }
-              if (waitingEvents == 0) {
-                if (error) {
-                  reject(error);
-                } else {
-                  resolve(returnCode);
-                }
-              }
+              complete();
             });
           });
         };
@@ -4601,8 +5522,13 @@ var require_toolrunner = __commonJS({
           });
           var success = true;
           var optionsNonNull = this._cloneExecOptions(options);
+          var df = this._createDisplayFilter(optionsNonNull);
           if (!optionsNonNull.silent) {
-            optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            if (df) {
+              df.commandLine(this._getCommandString(optionsNonNull) + os2.EOL);
+            } else {
+              optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            }
           }
           var cp;
           var toolPath = pipeOutputToTool.toolPath;
@@ -4619,30 +5545,31 @@ var require_toolrunner = __commonJS({
           waitingEvents++;
           cp = child.spawn(pipeOutputToTool._getSpawnFileName(optionsNonNull), pipeOutputToTool._getSpawnArgs(optionsNonNull), pipeOutputToTool._getSpawnOptions(optionsNonNull));
           fileStream = this.pipeOutputToFile ? fs3.createWriteStream(this.pipeOutputToFile) : null;
+          var complete = function() {
+            if (waitingEvents != 0) {
+              return;
+            }
+            if (df) {
+              df.finalize();
+            }
+            if (error) {
+              defer.reject(error);
+            } else {
+              defer.resolve(returnCode);
+            }
+          };
           if (fileStream) {
             waitingEvents++;
             fileStream.on("finish", function() {
               waitingEvents--;
               fileStream = null;
-              if (waitingEvents == 0) {
-                if (error) {
-                  defer.reject(error);
-                } else {
-                  defer.resolve(returnCode);
-                }
-              }
+              complete();
             });
             fileStream.on("error", function(err) {
               waitingEvents--;
               _this._debug("Failed to pipe output of ".concat(toolPathFirst, " to file ").concat(_this.pipeOutputToFile, ". Error = ").concat(err));
               fileStream = null;
-              if (waitingEvents == 0) {
-                if (error) {
-                  defer.reject(error);
-                } else {
-                  defer.resolve(returnCode);
-                }
-              }
+              complete();
             });
           }
           (_a = cpFirst.stdout) === null || _a === void 0 ? void 0 : _a.on("data", function(data) {
@@ -4663,8 +5590,12 @@ var require_toolrunner = __commonJS({
             }
             successFirst = !optionsNonNull.failOnStdErr;
             if (!optionsNonNull.silent) {
-              var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
-              s.write(data);
+              if (df) {
+                df.stderr(data);
+              } else {
+                var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
+                s.write(data);
+              }
             }
           });
           cpFirst.on("error", function(err) {
@@ -4675,9 +5606,7 @@ var require_toolrunner = __commonJS({
             }
             (_a2 = cp.stdin) === null || _a2 === void 0 ? void 0 : _a2.end();
             error = new Error(toolPathFirst + " failed. " + err.message);
-            if (waitingEvents == 0) {
-              defer.reject(error);
-            }
+            complete();
           });
           cpFirst.on("close", function(code, signal) {
             var _a2;
@@ -4692,19 +5621,17 @@ var require_toolrunner = __commonJS({
               fileStream.end();
             }
             (_a2 = cp.stdin) === null || _a2 === void 0 ? void 0 : _a2.end();
-            if (waitingEvents == 0) {
-              if (error) {
-                defer.reject(error);
-              } else {
-                defer.resolve(returnCode);
-              }
-            }
+            complete();
           });
           var stdLineBuffer = "";
           (_c = cp.stdout) === null || _c === void 0 ? void 0 : _c.on("data", function(data) {
             _this.emit("stdout", data);
             if (!optionsNonNull.silent) {
-              optionsNonNull.outStream.write(data);
+              if (df) {
+                df.stdout(data);
+              } else {
+                optionsNonNull.outStream.write(data);
+              }
             }
             stdLineBuffer = _this._processLineBuffer(data, stdLineBuffer, function(line) {
               _this.emit("stdline", line);
@@ -4715,8 +5642,12 @@ var require_toolrunner = __commonJS({
             _this.emit("stderr", data);
             success = !optionsNonNull.failOnStdErr;
             if (!optionsNonNull.silent) {
-              var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
-              s.write(data);
+              if (df) {
+                df.stderr(data);
+              } else {
+                var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
+                s.write(data);
+              }
             }
             errLineBuffer = _this._processLineBuffer(data, errLineBuffer, function(line) {
               _this.emit("errline", line);
@@ -4725,9 +5656,7 @@ var require_toolrunner = __commonJS({
           cp.on("error", function(err) {
             waitingEvents--;
             error = new Error(toolPath + " failed. " + err.message);
-            if (waitingEvents == 0) {
-              defer.reject(error);
-            }
+            complete();
           });
           cp.on("close", function(code, signal) {
             waitingEvents--;
@@ -4748,13 +5677,7 @@ var require_toolrunner = __commonJS({
             } else if (!success) {
               error = new Error(toolPath + " failed with return code: " + code);
             }
-            if (waitingEvents == 0) {
-              if (error) {
-                defer.reject(error);
-              } else {
-                defer.resolve(returnCode);
-              }
-            }
+            complete();
           });
           return defer.promise;
         };
@@ -4802,8 +5725,13 @@ var require_toolrunner = __commonJS({
             _this._debug("   " + arg);
           });
           var optionsNonNull = this._cloneExecOptions(options);
+          var df = this._createDisplayFilter(optionsNonNull);
           if (!optionsNonNull.silent) {
-            optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            if (df) {
+              df.commandLine(this._getCommandString(optionsNonNull) + os2.EOL);
+            } else {
+              optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            }
           }
           var state = new ExecState(optionsNonNull, this.toolPath);
           state.on("debug", function(message) {
@@ -4842,15 +5770,23 @@ var require_toolrunner = __commonJS({
             });
           }
           this.childProcess = cp;
-          (_a = cp.stdout) === null || _a === void 0 ? void 0 : _a.on("finish", function() {
+          (_a = cp.stdout) === null || _a === void 0 ? void 0 : _a.on("end", function() {
             if (!optionsNonNull.silent) {
-              optionsNonNull.outStream.write(os2.EOL);
+              if (df) {
+                df.stdout(Buffer.from(os2.EOL));
+              } else {
+                optionsNonNull.outStream.write(os2.EOL);
+              }
             }
           });
           (_b = cp.stdout) === null || _b === void 0 ? void 0 : _b.on("data", function(data) {
             _this.emit("stdout", data);
             if (!optionsNonNull.silent) {
-              optionsNonNull.outStream.write(data);
+              if (df) {
+                df.stdout(data);
+              } else {
+                optionsNonNull.outStream.write(data);
+              }
             }
             stdLineBuffer = _this._processLineBuffer(data, stdLineBuffer, function(line) {
               _this.emit("stdline", line);
@@ -4860,8 +5796,12 @@ var require_toolrunner = __commonJS({
             state.processStderr = true;
             _this.emit("stderr", data);
             if (!optionsNonNull.silent) {
-              var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
-              s.write(data);
+              if (df) {
+                df.stderr(data);
+              } else {
+                var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
+                s.write(data);
+              }
             }
             errLineBuffer = _this._processLineBuffer(data, errLineBuffer, function(line) {
               _this.emit("errline", line);
@@ -4880,6 +5820,9 @@ var require_toolrunner = __commonJS({
             state.CheckComplete();
           });
           cp.on("close", function(code, signal) {
+            if (df) {
+              df.finalize();
+            }
             state.processCloseCode = code;
             state.processCloseSignal = signal;
             state.processClosed = true;
@@ -4901,8 +5844,13 @@ var require_toolrunner = __commonJS({
             _this._debug("   " + arg);
           });
           var optionsNonNull = this._cloneExecOptions(options);
+          var df = this._createDisplayFilter(optionsNonNull);
           if (!optionsNonNull.silent) {
-            optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            if (df) {
+              df.commandLine(this._getCommandString(optionsNonNull) + os2.EOL);
+            } else {
+              optionsNonNull.outStream.write(this._getCommandString(optionsNonNull) + os2.EOL);
+            }
           }
           var state = new ExecState(optionsNonNull, this.toolPath);
           state.on("debug", function(message) {
@@ -4937,15 +5885,23 @@ var require_toolrunner = __commonJS({
             return defer.promise;
           }
           this.childProcess = cp;
-          (_a = cp.stdout) === null || _a === void 0 ? void 0 : _a.on("finish", function() {
+          (_a = cp.stdout) === null || _a === void 0 ? void 0 : _a.on("end", function() {
             if (!optionsNonNull.silent) {
-              optionsNonNull.outStream.write(os2.EOL);
+              if (df) {
+                df.stdout(Buffer.from(os2.EOL));
+              } else {
+                optionsNonNull.outStream.write(os2.EOL);
+              }
             }
           });
           (_b = cp.stdout) === null || _b === void 0 ? void 0 : _b.on("data", function(data) {
             _this.emit("stdout", data);
             if (!optionsNonNull.silent) {
-              optionsNonNull.outStream.write(data);
+              if (df) {
+                df.stdout(data);
+              } else {
+                optionsNonNull.outStream.write(data);
+              }
             }
             stdLineBuffer = _this._processLineBuffer(data, stdLineBuffer, function(line) {
               _this.emit("stdline", line);
@@ -4955,8 +5911,12 @@ var require_toolrunner = __commonJS({
             state.processStderr = true;
             _this.emit("stderr", data);
             if (!optionsNonNull.silent) {
-              var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
-              s.write(data);
+              if (df) {
+                df.stderr(data);
+              } else {
+                var s = optionsNonNull.failOnStdErr ? optionsNonNull.errStream : optionsNonNull.outStream;
+                s.write(data);
+              }
             }
             errLineBuffer = _this._processLineBuffer(data, errLineBuffer, function(line) {
               _this.emit("errline", line);
@@ -4975,6 +5935,9 @@ var require_toolrunner = __commonJS({
             state.CheckComplete();
           });
           cp.on("close", function(code, signal) {
+            if (df) {
+              df.finalize();
+            }
             state.processCloseCode = code;
             state.processCloseSignal = signal;
             state.processClosed = true;
@@ -4992,15 +5955,17 @@ var require_toolrunner = __commonJS({
           });
           var success = true;
           options = this._cloneExecOptions(options);
+          var ext = options.externalOutput;
           if (!options.silent) {
-            options.outStream.write(this._getCommandString(options) + os2.EOL);
+            var cmdLine = this._getCommandString(options) + os2.EOL;
+            options.outStream.write(ext ? eom.filterExternalOutput(cmdLine, ext) : cmdLine);
           }
           var r = child.spawnSync(this._getSpawnFileName(options), this._getSpawnArgs(options), this._getSpawnSyncOptions(options));
           if (!options.silent && r.stdout && r.stdout.length > 0) {
-            options.outStream.write(r.stdout);
+            options.outStream.write(ext ? eom.filterExternalOutput(r.stdout, ext) : r.stdout);
           }
           if (!options.silent && r.stderr && r.stderr.length > 0) {
-            options.errStream.write(r.stderr);
+            options.errStream.write(ext ? eom.filterExternalOutput(r.stderr, ext) : r.stderr);
           }
           var res = { code: r.status, error: r.error };
           res.stdout = r.stdout ? r.stdout.toString() : "";
@@ -5105,7 +6070,7 @@ var require_task = __commonJS({
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
     exports2.getPlatform = exports2.osType = exports2.writeFile = exports2.exist = exports2.stats = exports2.debug = exports2.error = exports2.warning = exports2.command = exports2.setTaskVariable = exports2.getTaskVariable = exports2.getSecureFileTicket = exports2.getSecureFileName = exports2.getEndpointAuthorization = exports2.getEndpointAuthorizationParameterRequired = exports2.getEndpointAuthorizationParameter = exports2.getEndpointAuthorizationSchemeRequired = exports2.getEndpointAuthorizationScheme = exports2.getEndpointDataParameterRequired = exports2.getEndpointDataParameter = exports2.getEndpointUrlRequired = exports2.getEndpointUrl = exports2.getPathInputRequired = exports2.getPathInput = exports2.filePathSupplied = exports2.getDelimitedInput = exports2.getPipelineFeature = exports2.getBoolFeatureFlag = exports2.getBoolInput = exports2.getInputRequired = exports2.getInput = exports2.setSecret = exports2.setVariable = exports2.getVariables = exports2.assertAgent = exports2.getVariable = exports2.loc = exports2.setResourcePath = exports2.setSanitizedResult = exports2.setResult = exports2.setErrStream = exports2.setStdStream = exports2.AgentHostedMode = exports2.Platform = exports2.IssueSource = exports2.FieldType = exports2.ArtifactType = exports2.IssueType = exports2.TaskState = exports2.TaskResult = void 0;
-    exports2.updateReleaseName = exports2.addBuildTag = exports2.updateBuildNumber = exports2.uploadBuildLog = exports2.associateArtifact = exports2.uploadArtifact = exports2.logIssue = exports2.logDetail = exports2.setProgress = exports2.setEndpoint = exports2.addAttachment = exports2.uploadSummary = exports2.prependPath = exports2.uploadFile = exports2.CodeCoverageEnabler = exports2.CodeCoveragePublisher = exports2.TestPublisher = exports2.getHttpCertConfiguration = exports2.getHttpProxyConfiguration = exports2.findMatch = exports2.filter = exports2.match = exports2.tool = exports2.execSync = exports2.exec = exports2.execAsync = exports2.rmRF = exports2.legacyFindFiles = exports2.find = exports2.retry = exports2.mv = exports2.cp = exports2.ls = exports2.which = exports2.resolve = exports2.mkdirP = exports2.popd = exports2.pushd = exports2.cd = exports2.checkPath = exports2.cwd = exports2.getSprint = exports2.getAgentMode = exports2.getNodeMajorVersion = void 0;
+    exports2.defaultAllowedVsoCommands = exports2.errorExternalOutput = exports2.warningExternalOutput = exports2.debugExternalOutput = exports2.writeExternalOutput = exports2.createExternalOutputStream = exports2.updateReleaseName = exports2.addBuildTag = exports2.updateBuildNumber = exports2.uploadBuildLog = exports2.associateArtifact = exports2.uploadArtifact = exports2.logIssue = exports2.logDetail = exports2.setProgress = exports2.setEndpoint = exports2.addAttachment = exports2.uploadSummary = exports2.prependPath = exports2.uploadFile = exports2.CodeCoverageEnabler = exports2.CodeCoveragePublisher = exports2.TestPublisher = exports2.getHttpCertConfiguration = exports2.getHttpProxyConfiguration = exports2.findMatch = exports2.filter = exports2.match = exports2.tool = exports2.execSync = exports2.exec = exports2.execAsync = exports2.rmRF = exports2.legacyFindFiles = exports2.find = exports2.retry = exports2.mv = exports2.cp = exports2.ls = exports2.which = exports2.resolve = exports2.mkdirP = exports2.popd = exports2.pushd = exports2.cd = exports2.checkPath = exports2.cwd = exports2.getSprint = exports2.getAgentMode = exports2.getNodeMajorVersion = void 0;
     var childProcess = require("child_process");
     var fs3 = require("fs");
     var path2 = require("path");
@@ -5114,6 +6079,7 @@ var require_task = __commonJS({
     var im = require_internal();
     var tcm = require_taskcommand();
     var trm = require_toolrunner();
+    var eom = require_externaloutput();
     var semver = require_semver();
     var TaskResult2;
     (function(TaskResult3) {
@@ -6158,21 +7124,60 @@ var require_task = __commonJS({
       }
       return Object.keys(allFiles).sort();
     }
+    function _quoteWindowsCmdPath(value) {
+      return '"'.concat(value.replace(/%/g, '"^%"'), '"');
+    }
+    function _publishRmRFSpecialPathTelemetry(inputPath) {
+      try {
+        var hasPercent = inputPath.includes("%");
+        var hasCmdMetachar = /[&|<>^]/.test(inputPath);
+        var hasDelayedExpansion = inputPath.includes("!");
+        var hasParentheses = /[()]/.test(inputPath);
+        if (!hasPercent && !hasCmdMetachar && !hasDelayedExpansion && !hasParentheses) {
+          return;
+        }
+        var message = JSON.stringify({
+          event: "SpecialPathDetected",
+          hasPercent,
+          hasCmdMetachar,
+          hasDelayedExpansion,
+          hasParentheses
+        });
+        console.log("##vso[telemetry.publish area=TaskHub;feature=TaskLibRmRF]".concat(message));
+      } catch (err) {
+        (0, exports2.debug)("Failed to publish rmRF telemetry: ".concat(err.message));
+      }
+    }
+    function _rmWindows(targetPath, isDirectory) {
+      var normalizedPath = im._normalizeSeparators(targetPath);
+      if (!getPipelineFeature("EnableRmRFCommandPathQuoting")) {
+        var legacyArgs = isDirectory ? ["/c", "rd", "/s", "/q", normalizedPath] : ["/c", "del", "/f", "/a", normalizedPath];
+        childProcess.execFileSync("cmd.exe", legacyArgs);
+        return;
+      }
+      var quotedPath = _quoteWindowsCmdPath(normalizedPath);
+      var args = isDirectory ? ["/d", "/v:off", "/c", "rd", "/s", "/q", quotedPath] : ["/d", "/v:off", "/c", "del", "/f", "/a", quotedPath];
+      var options = {
+        windowsVerbatimArguments: true
+      };
+      childProcess.execFileSync("cmd.exe", args, options);
+    }
     function rmRF2(inputPath) {
       (0, exports2.debug)("rm -rf " + inputPath);
       if (getPlatform() == Platform.Windows) {
+        _publishRmRFSpecialPathTelemetry(inputPath);
         try {
           var lstats = fs3.lstatSync(inputPath);
           if (lstats.isDirectory() && !lstats.isSymbolicLink()) {
             (0, exports2.debug)("removing directory " + inputPath);
-            childProcess.execFileSync("cmd.exe", ["/c", "rd", "/s", "/q", im._normalizeSeparators(inputPath)]);
+            _rmWindows(inputPath, true);
           } else if (lstats.isSymbolicLink()) {
             (0, exports2.debug)("removing symbolic link " + inputPath);
             var realPath = fs3.readlinkSync(inputPath);
             if (fs3.existsSync(realPath)) {
               var stats_4 = fs3.statSync(realPath);
               if (stats_4.isDirectory()) {
-                childProcess.execFileSync("cmd.exe", ["/c", "rd", "/s", "/q", im._normalizeSeparators(realPath)]);
+                _rmWindows(realPath, true);
                 fs3.unlinkSync(inputPath);
               } else {
                 fs3.unlinkSync(inputPath);
@@ -6183,7 +7188,7 @@ var require_task = __commonJS({
             }
           } else {
             (0, exports2.debug)("removing file " + inputPath);
-            childProcess.execFileSync("cmd.exe", ["/c", "del", "/f", "/a", im._normalizeSeparators(inputPath)]);
+            _rmWindows(inputPath, false);
           }
         } catch (err) {
           (0, exports2.debug)("Error: " + err.message);
@@ -6738,6 +7743,27 @@ var require_task = __commonJS({
     exports2.TaskCommand = tcm.TaskCommand;
     exports2.commandFromString = tcm.commandFromString;
     exports2.ToolRunner = trm.ToolRunner;
+    function createExternalOutputStream(options) {
+      return eom.createExternalOutputStream(options);
+    }
+    exports2.createExternalOutputStream = createExternalOutputStream;
+    function writeExternalOutput(message, options) {
+      eom.writeExternalOutput(message, options);
+    }
+    exports2.writeExternalOutput = writeExternalOutput;
+    function debugExternalOutput(message, options) {
+      eom.debugExternalOutput(message, options);
+    }
+    exports2.debugExternalOutput = debugExternalOutput;
+    function warningExternalOutput(message, options) {
+      eom.warningExternalOutput(message, options);
+    }
+    exports2.warningExternalOutput = warningExternalOutput;
+    function errorExternalOutput(message, options) {
+      eom.errorExternalOutput(message, options);
+    }
+    exports2.errorExternalOutput = errorExternalOutput;
+    exports2.defaultAllowedVsoCommands = eom.defaultAllowedVsoCommands;
     if (semver.lt(process.versions.node, "4.2.0")) {
       (0, exports2.warning)("Tasks require a new agent.  Upgrade your agent or node to 4.2.0 or later", exports2.IssueSource.TaskInternal);
     }
@@ -8663,15 +9689,19 @@ var require_utils = __commonJS({
       if (!obj || typeof obj !== "object") {
         return false;
       }
-      return !!(obj.constructor && obj.constructor.isBuffer && obj.constructor.isBuffer(obj));
+      return !!(obj.constructor && typeof obj.constructor.isBuffer === "function" && obj.constructor.isBuffer(obj));
     };
     var combine = function combine2(a, b, arrayLimit, plainObjects, throwOnLimitExceeded) {
       if (isOverflow(a)) {
         if (throwOnLimitExceeded) {
           throw new RangeError("Array limit exceeded. Only " + arrayLimit + " element" + (arrayLimit === 1 ? "" : "s") + " allowed in an array.");
         }
-        var newIndex = getMaxIndex(a) + 1;
-        a[newIndex] = b;
+        var bValues = isArray(b) ? b : [b];
+        var newIndex = getMaxIndex(a);
+        for (var i = 0; i < bValues.length; ++i) {
+          newIndex += 1;
+          a[newIndex] = bValues[i];
+        }
         setMaxIndex(a, newIndex);
         return a;
       }
@@ -8747,6 +9777,7 @@ var require_stringify = __commonJS({
       charsetSentinel: false,
       commaRoundTrip: false,
       delimiter: "&",
+      depth: Infinity,
       encode: true,
       encodeDotInKeys: false,
       encoder: utils.encode,
@@ -8766,8 +9797,11 @@ var require_stringify = __commonJS({
       return typeof v === "string" || typeof v === "number" || typeof v === "boolean" || typeof v === "symbol" || typeof v === "bigint";
     };
     var sentinel = {};
-    var stringify = function stringify2(object, prefix, generateArrayPrefix, commaRoundTrip, allowEmptyArrays, strictNullHandling, skipNulls, encodeDotInKeys, encoder, filter, sort, allowDots, serializeDate, format, formatter, encodeValuesOnly, charset, sideChannel) {
+    var stringify = function stringify2(object, prefix, generateArrayPrefix, commaRoundTrip, allowEmptyArrays, strictNullHandling, skipNulls, encodeDotInKeys, encoder, filter, sort, allowDots, serializeDate, format, formatter, encodeValuesOnly, charset, sideChannel, depth, currentDepth) {
       var obj = object;
+      if (currentDepth > depth) {
+        throw new RangeError("Input depth exceeded depth option of " + depth);
+      }
       var tmpSc = sideChannel;
       var step = 0;
       var findFlag = false;
@@ -8785,9 +9819,8 @@ var require_stringify = __commonJS({
           step = 0;
         }
       }
-      if (typeof filter === "function") {
-        obj = filter(prefix, obj);
-      } else if (obj instanceof Date) {
+      obj = typeof filter === "function" ? filter(prefix, obj) : obj;
+      if (obj instanceof Date) {
         obj = serializeDate(obj);
       } else if (generateArrayPrefix === "comma" && isArray(obj)) {
         obj = utils.maybeMap(obj, function(value2) {
@@ -8830,7 +9863,7 @@ var require_stringify = __commonJS({
       }
       var encodedPrefix = encodeDotInKeys ? String(prefix).replace(/\./g, "%2E") : String(prefix);
       var adjustedPrefix = commaRoundTrip && isArray(obj) && obj.length === 1 ? encodedPrefix + "[]" : encodedPrefix;
-      if (allowEmptyArrays && isArray(obj) && obj.length === 0) {
+      if (allowEmptyArrays && isArray(obj) && obj.length === 0 && Object.keys(obj).length === 0) {
         return adjustedPrefix + "[]";
       }
       for (var j = 0; j < objKeys.length; ++j) {
@@ -8862,7 +9895,9 @@ var require_stringify = __commonJS({
           formatter,
           encodeValuesOnly,
           charset,
-          valueSideChannel
+          valueSideChannel,
+          depth,
+          currentDepth + 1
         ));
       }
       return values;
@@ -8917,6 +9952,7 @@ var require_stringify = __commonJS({
         charsetSentinel: typeof opts.charsetSentinel === "boolean" ? opts.charsetSentinel : defaults.charsetSentinel,
         commaRoundTrip: !!opts.commaRoundTrip,
         delimiter: typeof opts.delimiter === "undefined" ? defaults.delimiter : opts.delimiter,
+        depth: typeof opts.depth === "number" ? opts.depth : defaults.depth,
         encode: typeof opts.encode === "boolean" ? opts.encode : defaults.encode,
         encodeDotInKeys: typeof opts.encodeDotInKeys === "boolean" ? opts.encodeDotInKeys : defaults.encodeDotInKeys,
         encoder: typeof opts.encoder === "function" ? opts.encoder : defaults.encoder,
@@ -8964,9 +10000,10 @@ var require_stringify = __commonJS({
         if (options.skipNulls && value === null) {
           continue;
         }
+        var encodedKey = options.encodeDotInKeys ? String(key).replace(/\./g, "%2E") : String(key);
         pushToArray(keys, stringify(
           value,
-          key,
+          encodedKey,
           generateArrayPrefix,
           commaRoundTrip,
           options.allowEmptyArrays,
@@ -8982,7 +10019,9 @@ var require_stringify = __commonJS({
           options.formatter,
           options.encodeValuesOnly,
           options.charset,
-          sideChannel
+          sideChannel,
+          options.depth,
+          0
         ));
       }
       var joined = keys.join(options.delimiter);
@@ -9035,9 +10074,9 @@ var require_parse = __commonJS({
         return String.fromCharCode(parseInt(numberStr, 10));
       });
     };
-    var parseArrayValue = function(val, options, currentArrayLength, isFlatArrayValue) {
+    var parseArrayValue = function(val, options, currentArrayLength) {
       if (val && typeof val === "string" && options.comma && val.indexOf(",") > -1) {
-        if (isFlatArrayValue && options.throwOnLimitExceeded) {
+        if (options.throwOnLimitExceeded) {
           var commaCount = 0;
           var commaIndex = val.indexOf(",");
           while (commaIndex > -1) {
@@ -9104,8 +10143,7 @@ var require_parse = __commonJS({
               parseArrayValue(
                 part.slice(pos + 1),
                 options,
-                isArray(obj[key]) ? obj[key].length : 0,
-                part.indexOf("[]=") === -1
+                isArray(obj[key]) ? obj[key].length : 0
               ),
               function(encodedVal) {
                 return options.decoder(encodedVal, defaults.decoder, charset, "value");
@@ -9348,6 +10386,11 @@ var require_Util = __commonJS({
   "node_modules/typed-rest-client/Util.js"(exports2) {
     "use strict";
     var __awaiter = exports2 && exports2.__awaiter || function(thisArg, _arguments, P, generator) {
+      function adopt(value) {
+        return value instanceof P ? value : new P(function(resolve) {
+          resolve(value);
+        });
+      }
       return new (P || (P = Promise))(function(resolve, reject) {
         function fulfilled(value) {
           try {
@@ -9364,44 +10407,41 @@ var require_Util = __commonJS({
           }
         }
         function step(result) {
-          result.done ? resolve(result.value) : new P(function(resolve2) {
-            resolve2(result.value);
-          }).then(fulfilled, rejected);
+          result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
         }
         step((generator = generator.apply(thisArg, _arguments || [])).next());
       });
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
+    exports2.getUrl = getUrl;
+    exports2.decompressGzippedContent = decompressGzippedContent;
+    exports2.buildProxyBypassRegexFromEnv = buildProxyBypassRegexFromEnv;
+    exports2.obtainContentCharset = obtainContentCharset;
     var qs = require_lib();
-    var url = require("url");
-    var path2 = require("path");
     var zlib = require("zlib");
     function getUrl(resource, baseUrl, queryParams) {
-      const pathApi = path2.posix || path2;
       let requestUrl = "";
       if (!baseUrl) {
         requestUrl = resource;
       } else if (!resource) {
         requestUrl = baseUrl;
       } else {
-        const base = url.parse(baseUrl);
-        const resultantUrl = url.parse(resource);
-        resultantUrl.protocol = resultantUrl.protocol || base.protocol;
-        resultantUrl.auth = resultantUrl.auth || base.auth;
-        resultantUrl.host = resultantUrl.host || base.host;
-        resultantUrl.pathname = pathApi.resolve(base.pathname, resultantUrl.pathname);
+        const effectiveBase = new URL(baseUrl);
+        if (!effectiveBase.pathname.endsWith("/")) {
+          effectiveBase.pathname += "/";
+        }
+        const resultantUrl = new URL(resource, effectiveBase.href);
         if (!resultantUrl.pathname.endsWith("/") && resource.endsWith("/")) {
           resultantUrl.pathname += "/";
         }
-        requestUrl = url.format(resultantUrl);
+        requestUrl = resultantUrl.href;
       }
       return queryParams ? getUrlWithParsedQueryParams(requestUrl, queryParams) : requestUrl;
     }
-    exports2.getUrl = getUrl;
     function getUrlWithParsedQueryParams(requestUrl, queryParams) {
-      const url2 = requestUrl.replace(/\?$/g, "");
+      const url = requestUrl.replace(/\?$/g, "");
       const parsedQueryParams = qs.stringify(queryParams.params, buildParamsStringifyOptions(queryParams));
-      return `${url2}${parsedQueryParams}`;
+      return `${url}${parsedQueryParams}`;
     }
     function buildParamsStringifyOptions(queryParams) {
       let options = {
@@ -9426,7 +10466,6 @@ var require_Util = __commonJS({
         }));
       });
     }
-    exports2.decompressGzippedContent = decompressGzippedContent;
     function buildProxyBypassRegexFromEnv(bypass) {
       try {
         return new RegExp(bypass, "i");
@@ -9438,14 +10477,15 @@ var require_Util = __commonJS({
         throw err;
       }
     }
-    exports2.buildProxyBypassRegexFromEnv = buildProxyBypassRegexFromEnv;
     function obtainContentCharset(response) {
       const nodeSupportedEncodings = ["ascii", "utf8", "utf16le", "ucs2", "base64", "binary", "hex"];
       const contentType = response.message.headers["content-type"] || "";
       const matches = contentType.match(/charset=([^;,\r\n]+)/i);
-      return matches && matches[1] && nodeSupportedEncodings.indexOf(matches[1]) != -1 ? matches[1] : "utf-8";
+      if (matches && matches[1] && nodeSupportedEncodings.indexOf(matches[1]) != -1) {
+        return matches[1];
+      }
+      return "utf-8";
     }
-    exports2.obtainContentCharset = obtainContentCharset;
   }
 });
 
@@ -9691,6 +10731,11 @@ var require_HttpClient = __commonJS({
   "node_modules/typed-rest-client/HttpClient.js"(exports2) {
     "use strict";
     var __awaiter = exports2 && exports2.__awaiter || function(thisArg, _arguments, P, generator) {
+      function adopt(value) {
+        return value instanceof P ? value : new P(function(resolve) {
+          resolve(value);
+        });
+      }
       return new (P || (P = Promise))(function(resolve, reject) {
         function fulfilled(value) {
           try {
@@ -9707,15 +10752,14 @@ var require_HttpClient = __commonJS({
           }
         }
         function step(result) {
-          result.done ? resolve(result.value) : new P(function(resolve2) {
-            resolve2(result.value);
-          }).then(fulfilled, rejected);
+          result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
         }
         step((generator = generator.apply(thisArg, _arguments || [])).next());
       });
     };
     Object.defineProperty(exports2, "__esModule", { value: true });
-    var url = require("url");
+    exports2.HttpClient = exports2.HttpClientResponse = exports2.HttpCodes = void 0;
+    exports2.isHttps = isHttps;
     var http = require("http");
     var https = require("https");
     var util = require_Util();
@@ -9750,10 +10794,10 @@ var require_HttpClient = __commonJS({
       HttpCodes2[HttpCodes2["BadGateway"] = 502] = "BadGateway";
       HttpCodes2[HttpCodes2["ServiceUnavailable"] = 503] = "ServiceUnavailable";
       HttpCodes2[HttpCodes2["GatewayTimeout"] = 504] = "GatewayTimeout";
-    })(HttpCodes = exports2.HttpCodes || (exports2.HttpCodes = {}));
+    })(HttpCodes || (exports2.HttpCodes = HttpCodes = {}));
     var HttpRedirectCodes = [HttpCodes.MovedPermanently, HttpCodes.ResourceMoved, HttpCodes.SeeOther, HttpCodes.TemporaryRedirect, HttpCodes.PermanentRedirect];
     var HttpResponseRetryCodes = [HttpCodes.BadGateway, HttpCodes.ServiceUnavailable, HttpCodes.GatewayTimeout];
-    var NetworkRetryErrors = ["ECONNRESET", "ENOTFOUND", "ESOCKETTIMEDOUT", "ETIMEDOUT", "ECONNREFUSED"];
+    var NetworkRetryErrors = ["ECONNRESET", "ENOTFOUND", "ESOCKETTIMEDOUT", "ETIMEDOUT", "ECONNREFUSED", "EHOSTUNREACH"];
     var RetryableHttpVerbs = ["OPTIONS", "GET", "DELETE", "HEAD"];
     var ExponentialBackoffCeiling = 10;
     var ExponentialBackoffTimeSlice = 5;
@@ -9788,10 +10832,9 @@ var require_HttpClient = __commonJS({
     };
     exports2.HttpClientResponse = HttpClientResponse;
     function isHttps(requestUrl) {
-      let parsedUrl = url.parse(requestUrl);
+      const parsedUrl = new URL(requestUrl);
       return parsedUrl.protocol === "https:";
     }
-    exports2.isHttps = isHttps;
     var EnvironmentVariables;
     (function(EnvironmentVariables2) {
       EnvironmentVariables2["HTTP_PROXY"] = "HTTP_PROXY";
@@ -9808,6 +10851,10 @@ var require_HttpClient = __commonJS({
         this._maxRetries = 1;
         this._keepAlive = false;
         this._disposed = false;
+        this._httpGlobalAgentOptions = {
+          keepAlive: false,
+          timeout: 3e4
+        };
         this.userAgent = userAgent;
         this.handlers = handlers || [];
         let no_proxy = process.env[EnvironmentVariables.NO_PROXY];
@@ -9829,6 +10876,9 @@ var require_HttpClient = __commonJS({
             requestOptions.proxy.proxyBypassHosts.forEach((bypass) => {
               this._httpProxyBypassHosts.push(new RegExp(bypass, "i"));
             });
+          }
+          if (requestOptions.globalAgentOptions) {
+            this._httpGlobalAgentOptions = requestOptions.globalAgentOptions;
           }
           this._certConfig = requestOptions.cert;
           if (this._certConfig) {
@@ -9897,7 +10947,7 @@ var require_HttpClient = __commonJS({
           if (this._disposed) {
             throw new Error("Client has already been disposed.");
           }
-          let parsedUrl = url.parse(requestUrl);
+          const parsedUrl = new URL(requestUrl);
           let info = this._prepareRequest(verb, parsedUrl, headers);
           let maxTries = this._allowRetries && RetryableHttpVerbs.indexOf(verb) != -1 ? this._maxRetries + 1 : 1;
           let numTries = 0;
@@ -9933,7 +10983,7 @@ var require_HttpClient = __commonJS({
               if (!redirectUrl) {
                 break;
               }
-              let parsedRedirectUrl = url.parse(redirectUrl);
+              const parsedRedirectUrl = new URL(redirectUrl, parsedUrl.href);
               if (parsedUrl.protocol == "https:" && parsedUrl.protocol != parsedRedirectUrl.protocol && !this._allowRedirectDowngrade) {
                 throw new Error("Redirect from HTTPS to HTTP protocol. This downgrade is not allowed for security reasons. If you want to allow this behavior, set the allowRedirectDowngrade option to true.");
               }
@@ -10028,13 +11078,13 @@ var require_HttpClient = __commonJS({
       _prepareRequest(method, requestUrl, headers) {
         const info = {};
         info.parsedUrl = requestUrl;
-        const usingSsl = info.parsedUrl.protocol === "https:";
+        const usingSsl = requestUrl.protocol === "https:";
         info.httpModule = usingSsl ? https : http;
         const defaultPort = usingSsl ? 443 : 80;
         info.options = {};
-        info.options.host = info.parsedUrl.hostname;
-        info.options.port = info.parsedUrl.port ? parseInt(info.parsedUrl.port) : defaultPort;
-        info.options.path = (info.parsedUrl.pathname || "") + (info.parsedUrl.search || "");
+        info.options.host = requestUrl.hostname;
+        info.options.port = requestUrl.port ? parseInt(requestUrl.port) : defaultPort;
+        info.options.path = requestUrl.pathname + requestUrl.search;
         info.options.method = method;
         info.options.timeout = this.requestOptions && this.requestOptions.socketTimeout || this._socketTimeout;
         this._socketTimeout = info.options.timeout;
@@ -10042,8 +11092,8 @@ var require_HttpClient = __commonJS({
         if (this.userAgent != null) {
           info.options.headers["user-agent"] = this.userAgent;
         }
-        info.options.agent = this._getAgent(info.parsedUrl);
-        if (this.handlers && !this._isPresigned(url.format(requestUrl))) {
+        info.options.agent = this._getAgent(requestUrl);
+        if (this.handlers && !this._isPresigned(requestUrl.href)) {
           this.handlers.forEach((handler) => {
             handler.prepareRequest(info.options);
           });
@@ -10096,7 +11146,7 @@ var require_HttpClient = __commonJS({
             proxy: {
               proxyAuth: proxy.proxyAuth,
               host: proxy.proxyUrl.hostname,
-              port: proxy.proxyUrl.port
+              port: Number(proxy.proxyUrl.port) || (proxy.proxyUrl.protocol === "https:" ? 443 : 80)
             }
           };
           let tunnelAgent;
@@ -10115,7 +11165,11 @@ var require_HttpClient = __commonJS({
           this._agent = agent;
         }
         if (!agent) {
-          agent = usingSsl ? https.globalAgent : http.globalAgent;
+          const globalAgentOptions = {
+            keepAlive: this._httpGlobalAgentOptions.keepAlive,
+            timeout: this._httpGlobalAgentOptions.timeout
+          };
+          agent = usingSsl ? new https.Agent(globalAgentOptions) : new http.Agent(globalAgentOptions);
         }
         if (usingSsl && this._ignoreSslError) {
           agent.options = Object.assign(agent.options || {}, { rejectUnauthorized: false });
@@ -10145,7 +11199,7 @@ var require_HttpClient = __commonJS({
         let proxyAuth;
         if (proxyConfig) {
           if (proxyConfig.proxyUrl.length > 0) {
-            proxyUrl = url.parse(proxyConfig.proxyUrl);
+            proxyUrl = new URL(proxyConfig.proxyUrl);
           }
           if (proxyConfig.proxyUsername || proxyConfig.proxyPassword) {
             proxyAuth = proxyConfig.proxyUsername + ":" + proxyConfig.proxyPassword;
@@ -11348,7 +12402,7 @@ var require_package = __commonJS({
   "node_modules/azure-pipelines-tool-lib/package.json"(exports2, module2) {
     module2.exports = {
       name: "azure-pipelines-tool-lib",
-      version: "2.0.12",
+      version: "2.280.1",
       description: "Azure Pipelines Tool Installer Lib for CI/CD Tasks",
       main: "tool.js",
       scripts: {
@@ -11373,10 +12427,10 @@ var require_package = __commonJS({
       dependencies: {
         "@types/semver": "^5.3.0",
         "@types/uuid": "^3.4.5",
-        "azure-pipelines-task-lib": "^5.2.7",
+        "azure-pipelines-task-lib": "^5.280.1",
         semver: "^5.7.0",
         "semver-compare": "^1.0.0",
-        "typed-rest-client": "^1.8.6",
+        "typed-rest-client": "^3.1.2",
         uuid: "^3.3.2"
       },
       devDependencies: {
@@ -11385,11 +12439,15 @@ var require_package = __commonJS({
         "@types/shelljs": "^0.8.4",
         "@types/xml2js": "^0.4.5",
         mocha: "^6.2.3",
-        nock: "13.0.4",
-        shelljs: "^0.8.5",
+        nock: "13.5.6",
+        shelljs: "^0.10.0",
         typescript: "^4.0.5",
         xml2js: "^0.4.23",
         nyc: "^17.0.0"
+      },
+      overrides: {
+        minimatch: "^3.1.5",
+        "js-yaml@3.x": { ".": "^3.15.2" }
       }
     };
   }
